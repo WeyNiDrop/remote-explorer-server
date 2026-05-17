@@ -69,15 +69,15 @@ Client side:
   - hot-applies through `stream_config` while the UDP stream is running
 - Unity WebRTC/H.264 playback is implemented behind the
   `REMOTE_EXPLORER_HAS_WEBRTC` package version define. It is enabled when
-  `com.unity.webrtc@3.0.0-pre.8` resolves; otherwise the client keeps using the
-  UDP/JPEG fallback display.
+  `com.unity.webrtc@3.0.0-pre.8` resolves. In the WebRTC branch, negotiation
+  failure is reported directly instead of falling back to UDP/JPEG.
 
 Known MVP limits:
 
 - UDP frame chunks are best-effort. Lost chunks drop a frame.
 - 1080p can generate many datagrams per frame; use 360p/540p first on weak Wi-Fi.
-- If JPEG/UDP is not smooth enough, move the stream layer to WebRTC while
-  keeping the same control protocol.
+- If JPEG/UDP is not smooth enough, use the WebRTC branch while keeping the
+  same control protocol.
 
 ## Stage 3: Player Capture and TV Controls
 

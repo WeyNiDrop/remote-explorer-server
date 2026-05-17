@@ -37,7 +37,7 @@ Status: in development.
   - 30fps default
   - selectable 20-60fps range
   - tap preview to click remote page
-  - optional WebRTC/H.264 signaling path, with UDP/JPEG as fallback
+  - optional WebRTC/H.264 signaling path; WebRTC failures are reported directly
 - Python development client for protocol testing.
 
 Success criteria:

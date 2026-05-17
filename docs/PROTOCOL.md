@@ -314,7 +314,7 @@ The server answers:
 
 Server WebRTC support is optional and requires the Python `webrtc` extra
 dependencies. If they are missing, this command returns a normal command error
-and the client can fall back to UDP/JPEG streaming.
+and the WebRTC branch reports the failure directly.
 
 ### `webrtc_stop`
 

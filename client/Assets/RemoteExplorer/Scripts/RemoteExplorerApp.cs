@@ -455,32 +455,42 @@ namespace RemoteExplorer
             var resolution = SelectedStreamResolution();
             var fps = SelectedStreamFps();
 #if REMOTE_EXPLORER_HAS_WEBRTC
-            if (webRtcPlayback != null)
+            if (webRtcPlayback == null)
             {
-                SetStatus($"Starting WebRTC {resolution} at {fps} fps");
-                try
-                {
-                    var webRtcResult = await webRtcPlayback.StartAsync(resolution, fps, lifetime.Token);
-                    if (webRtcResult.ok || webRtcResult.type == "result")
-                    {
-                        SetButtonLabel(streamToggleButton, "Stop");
-                        MarkStreamFrameClock();
-                        SetStreamStatus($"WebRTC {resolution} / {fps}fps");
-                        SetStatus("WebRTC stream started");
-                        return;
-                    }
-
-                    var webRtcError = webRtcResult.error != null
-                        ? $"{webRtcResult.error.code}: {webRtcResult.error.message}"
-                        : "Unknown error";
-                    SetStatus("WebRTC failed; falling back to image stream: " + webRtcError);
-                }
-                catch (Exception ex)
-                {
-                    SetStatus("WebRTC failed; falling back to image stream: " + ex.Message);
-                }
+                SetStreamStatus("WebRTC playback component is not available");
+                SetStatus("WebRTC unavailable: playback component is missing");
+                SetButtonLabel(streamToggleButton, "Start");
+                return;
             }
-#endif
+
+            SetStatus($"Starting WebRTC {resolution} at {fps} fps");
+            try
+            {
+                var webRtcResult = await webRtcPlayback.StartAsync(resolution, fps, lifetime.Token);
+                if (webRtcResult.ok || webRtcResult.type == "result")
+                {
+                    SetButtonLabel(streamToggleButton, "Stop");
+                    MarkStreamFrameClock();
+                    SetStreamStatus($"WebRTC {resolution} / {fps}fps");
+                    SetStatus("WebRTC stream started");
+                    return;
+                }
+
+                var webRtcError = webRtcResult.error != null
+                    ? $"{webRtcResult.error.code}: {webRtcResult.error.message}"
+                    : "Unknown error";
+                SetStreamStatus("WebRTC failed: " + webRtcError);
+                SetStatus("WebRTC stream failed: " + webRtcError);
+                SetButtonLabel(streamToggleButton, "Start");
+            }
+            catch (Exception ex)
+            {
+                SetStreamStatus("WebRTC failed: " + ex.Message);
+                SetStatus("WebRTC stream failed: " + ex.Message);
+                SetButtonLabel(streamToggleButton, "Start");
+            }
+            return;
+#else
 
             SetStatus($"Starting image stream {resolution} at {fps} fps");
             try
@@ -506,6 +516,7 @@ namespace RemoteExplorer
             {
                 SetStatus("Stream failed: " + ex.Message);
             }
+#endif
         }
 
         private async Task StopStreamAsync()

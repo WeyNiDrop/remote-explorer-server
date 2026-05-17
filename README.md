@@ -55,7 +55,8 @@ Implemented client features:
 - Stream FPS defaults to 30 and can be configured from 20-60 in the client.
 - WebRTC/H.264 streaming is available when the Python server is installed with
   the `webrtc` extra and the Unity WebRTC package resolves in the client
-  project. The client falls back to UDP/JPEG if WebRTC negotiation fails.
+  project. In the WebRTC branch, negotiation failure is reported directly and
+  does not fall back to UDP/JPEG.
 - Tap preview to click the remote webpage.
 
 The client UI is created at runtime by `RemoteExplorerBootstrap`, so an empty
