@@ -67,9 +67,10 @@ Client side:
   - 30fps default
   - 20-60fps range
   - hot-applies through `stream_config` while the UDP stream is running
-- Unity WebRTC/H.264 playback still needs the Unity WebRTC package to be added
-  to the client project before it can replace the fallback UDP/JPEG display:
-  `com.unity.webrtc@3.0.0-pre.8`.
+- Unity WebRTC/H.264 playback is implemented behind the
+  `REMOTE_EXPLORER_HAS_WEBRTC` package version define. It is enabled when
+  `com.unity.webrtc@3.0.0-pre.8` resolves; otherwise the client keeps using the
+  UDP/JPEG fallback display.
 
 Known MVP limits:
 

@@ -44,6 +44,9 @@ namespace RemoteExplorer
         private RawImage streamImage;
         private Text streamStatusText;
         private Texture2D streamTexture;
+#if REMOTE_EXPLORER_HAS_WEBRTC
+        private RemoteExplorerWebRtcPlayback webRtcPlayback;
+#endif
         private int latestSourceWidth = 1;
         private int latestSourceHeight = 1;
         private float lastStreamFrameAt = -1f;
@@ -431,7 +434,7 @@ namespace RemoteExplorer
 
         private async Task ToggleStreamAsync()
         {
-            if (client.IsStreaming)
+            if (IsStreamActive())
             {
                 await StopStreamAsync();
             }
@@ -451,7 +454,35 @@ namespace RemoteExplorer
 
             var resolution = SelectedStreamResolution();
             var fps = SelectedStreamFps();
-            SetStatus($"Starting stream {resolution} at {fps} fps");
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            if (webRtcPlayback != null)
+            {
+                SetStatus($"Starting WebRTC {resolution} at {fps} fps");
+                try
+                {
+                    var webRtcResult = await webRtcPlayback.StartAsync(resolution, fps, lifetime.Token);
+                    if (webRtcResult.ok || webRtcResult.type == "result")
+                    {
+                        SetButtonLabel(streamToggleButton, "Stop");
+                        MarkStreamFrameClock();
+                        SetStreamStatus($"WebRTC {resolution} / {fps}fps");
+                        SetStatus("WebRTC stream started");
+                        return;
+                    }
+
+                    var webRtcError = webRtcResult.error != null
+                        ? $"{webRtcResult.error.code}: {webRtcResult.error.message}"
+                        : "Unknown error";
+                    SetStatus("WebRTC failed; falling back to image stream: " + webRtcError);
+                }
+                catch (Exception ex)
+                {
+                    SetStatus("WebRTC failed; falling back to image stream: " + ex.Message);
+                }
+            }
+#endif
+
+            SetStatus($"Starting image stream {resolution} at {fps} fps");
             try
             {
                 var result = await client.StartStreamAsync(
@@ -481,7 +512,16 @@ namespace RemoteExplorer
         {
             try
             {
-                await client.StopStreamAsync(lifetime.Token);
+#if REMOTE_EXPLORER_HAS_WEBRTC
+                if (webRtcPlayback != null && webRtcPlayback.IsActive)
+                {
+                    await webRtcPlayback.StopAsync(lifetime.Token);
+                }
+#endif
+                if (client.IsStreaming)
+                {
+                    await client.StopStreamAsync(lifetime.Token);
+                }
             }
             catch (Exception ex)
             {
@@ -498,13 +538,23 @@ namespace RemoteExplorer
 
         private async Task ApplyStreamSettingsAsync()
         {
-            if (!client.IsConnected || !client.IsStreaming)
+            if (!client.IsConnected || !IsStreamActive())
             {
                 return;
             }
 
             var resolution = SelectedStreamResolution();
             var fps = SelectedStreamFps();
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            if (webRtcPlayback != null && webRtcPlayback.IsActive)
+            {
+                SetStreamStatus($"Applying WebRTC {resolution} / {fps}fps...");
+                await StopStreamAsync();
+                await StartStreamAsync();
+                return;
+            }
+#endif
+
             SetStreamStatus($"Applying {resolution} / {fps}fps...");
             try
             {
@@ -530,7 +580,7 @@ namespace RemoteExplorer
 
         private void UpdateStreamWatchdog()
         {
-            if (!client.IsStreaming || !client.IsConnected || streamRestartInFlight)
+            if (!IsStreamActive() || !client.IsConnected || streamRestartInFlight)
             {
                 return;
             }
@@ -552,39 +602,31 @@ namespace RemoteExplorer
 
         private async Task RestartStalledStreamAsync()
         {
-            if (streamRestartInFlight || !client.IsConnected || !client.IsStreaming)
+            if (streamRestartInFlight || !client.IsConnected || !IsStreamActive())
             {
                 return;
             }
 
             streamRestartInFlight = true;
-            var resolution = SelectedStreamResolution();
-            var fps = SelectedStreamFps();
             SetStreamStatus("Stream stalled; restarting...");
             try
             {
-                await client.StopStreamAsync(lifetime.Token);
+#if REMOTE_EXPLORER_HAS_WEBRTC
+                if (webRtcPlayback != null && webRtcPlayback.IsActive)
+                {
+                    await webRtcPlayback.StopAsync(lifetime.Token);
+                }
+#endif
+                if (client.IsStreaming)
+                {
+                    await client.StopStreamAsync(lifetime.Token);
+                }
                 if (!client.IsConnected)
                 {
                     return;
                 }
 
-                var result = await client.StartStreamAsync(
-                    resolution,
-                    fps,
-                    RemoteExplorerClient.DefaultStreamQuality,
-                    lifetime.Token);
-                if (result.ok || result.type == "result")
-                {
-                    MarkStreamFrameClock();
-                    SetButtonLabel(streamToggleButton, "Stop");
-                    SetStatus("Stream restarted");
-                    SetStreamStatus($"Waiting for {resolution} / {fps}fps frames...");
-                    return;
-                }
-
-                var error = result.error != null ? $"{result.error.code}: {result.error.message}" : "Unknown error";
-                SetStatus("Stream restart failed: " + error);
+                await StartStreamAsync();
             }
             catch (Exception ex)
             {
@@ -601,6 +643,15 @@ namespace RemoteExplorer
         {
             lastStreamFrameAt = Time.unscaledTime;
             nextStreamWatchdogAt = lastStreamFrameAt + StreamWatchdogSeconds;
+        }
+
+        private bool IsStreamActive()
+        {
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            return client.IsStreaming || (webRtcPlayback != null && webRtcPlayback.IsActive);
+#else
+            return client.IsStreaming;
+#endif
         }
 
         private async Task ClickPreviewAsync(Vector2 normalized)
@@ -864,6 +915,16 @@ namespace RemoteExplorer
                 return;
             }
 
+            ApplyStreamFit(frame.Width, frame.Height);
+        }
+
+        private void ApplyStreamFit(int width, int height)
+        {
+            if (streamImage == null || width <= 0 || height <= 0)
+            {
+                return;
+            }
+
             streamImage.uvRect = new Rect(0f, 0f, 1f, 1f);
 
             var imageRect = streamImage.rectTransform;
@@ -874,7 +935,7 @@ namespace RemoteExplorer
                 return;
             }
 
-            var imageAspect = (float)frame.Width / frame.Height;
+            var imageAspect = (float)width / height;
             var boundsAspect = bounds.width / bounds.height;
             var fittedWidth = bounds.width;
             var fittedHeight = fittedWidth / imageAspect;
@@ -1198,6 +1259,23 @@ namespace RemoteExplorer
 
             var streamView = previewObject.AddComponent<RemoteExplorerStreamView>();
             streamView.OnTap = point => FireAndForget(() => ClickPreviewAsync(point));
+
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            webRtcPlayback = gameObject.GetComponent<RemoteExplorerWebRtcPlayback>();
+            if (webRtcPlayback == null)
+            {
+                webRtcPlayback = gameObject.AddComponent<RemoteExplorerWebRtcPlayback>();
+            }
+
+            webRtcPlayback.Configure(client, streamImage, SetStreamStatus);
+            webRtcPlayback.OnFrameSize = (width, height) =>
+            {
+                latestSourceWidth = Mathf.Max(1, width);
+                latestSourceHeight = Mathf.Max(1, height);
+                ApplyStreamFit(latestSourceWidth, latestSourceHeight);
+            };
+            webRtcPlayback.OnFrameReceived = MarkStreamFrameClock;
+#endif
         }
 
         private string SelectedStreamResolution()
@@ -1233,7 +1311,7 @@ namespace RemoteExplorer
         private void ScheduleStreamSettingsApply()
         {
             UpdateStreamFpsLabel();
-            if (!client.IsStreaming)
+            if (!IsStreamActive())
             {
                 return;
             }

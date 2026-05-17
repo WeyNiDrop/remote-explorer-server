@@ -11,6 +11,12 @@
   "precompiledReferences": [],
   "autoReferenced": true,
   "defineConstraints": [],
-  "versionDefines": [],
+  "versionDefines": [
+    {
+      "name": "com.unity.webrtc",
+      "expression": "3.0.0-pre.8",
+      "define": "REMOTE_EXPLORER_HAS_WEBRTC"
+    }
+  ],
   "noEngineReferences": false
 }

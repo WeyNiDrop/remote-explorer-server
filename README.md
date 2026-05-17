@@ -53,9 +53,9 @@ Implemented client features:
 - Remote open/close page, back, forward, reload, and status commands.
 - UDP JPEG browser preview stream with 360p/540p/720p/1080p options.
 - Stream FPS defaults to 30 and can be configured from 20-60 in the client.
-- Server-side WebRTC/H.264 offer/answer support is available through the
-  optional Python `webrtc` extra; Unity playback requires adding Unity WebRTC to
-  the client project, for example `com.unity.webrtc@3.0.0-pre.8`.
+- WebRTC/H.264 streaming is available when the Python server is installed with
+  the `webrtc` extra and the Unity WebRTC package resolves in the client
+  project. The client falls back to UDP/JPEG if WebRTC negotiation fails.
 - Tap preview to click the remote webpage.
 
 The client UI is created at runtime by `RemoteExplorerBootstrap`, so an empty
