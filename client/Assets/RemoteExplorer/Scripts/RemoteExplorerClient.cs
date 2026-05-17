@@ -40,6 +40,9 @@ namespace RemoteExplorer
         private const int StreamReceiveBufferBytes = 384 * 1024;
         private const int MaxReceiveBurstPackets = 256;
         private const int SioUdpConnectionReset = -1744830452;
+        private const float DefaultControlTimeoutSeconds = 3f;
+        private const float WebRtcOfferTimeoutSeconds = 15f;
+        private const float WebRtcStopTimeoutSeconds = 8f;
         public const int DefaultStreamFps = 30;
         public const int MinStreamFps = 20;
         public const int MaxStreamFps = 60;
@@ -451,7 +454,8 @@ namespace RemoteExplorer
                     ["resolution"] = resolution,
                     ["fps"] = ClampStreamFps(fps)
                 },
-                cancellationToken);
+                cancellationToken,
+                WebRtcOfferTimeoutSeconds);
         }
 
         public async Task<CommandEnvelope> WebRtcStatusAsync(CancellationToken cancellationToken = default)
@@ -464,13 +468,15 @@ namespace RemoteExplorer
             return await SendCommandAsync(
                 "webrtc_stop",
                 new Dictionary<string, object> { ["peer_id"] = peerId ?? string.Empty },
-                cancellationToken);
+                cancellationToken,
+                WebRtcStopTimeoutSeconds);
         }
 
         public async Task<CommandEnvelope> SendCommandAsync(
             string command,
             Dictionary<string, object> payload,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            float timeoutSeconds = DefaultControlTimeoutSeconds)
         {
             if (!IsConnected)
             {
@@ -497,7 +503,7 @@ namespace RemoteExplorer
                 auth["signature"] = RemoteExplorerProtocol.SignMessage(message, sessionKey);
             }
 
-            return await SendRequestAsync<CommandEnvelope>(message, cancellationToken);
+            return await SendRequestAsync<CommandEnvelope>(message, cancellationToken, timeoutSeconds);
         }
 
         public void Disconnect()
@@ -834,7 +840,8 @@ namespace RemoteExplorer
 
         private async Task<T> SendRequestAsync<T>(
             Dictionary<string, object> message,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            float timeoutSeconds = DefaultControlTimeoutSeconds)
             where T : class
         {
             if (controlClient == null || controlEndpoint == null)
@@ -849,7 +856,7 @@ namespace RemoteExplorer
                 var payload = RemoteExplorerProtocol.Encode(message);
                 await controlClient.SendAsync(payload, payload.Length, controlEndpoint);
 
-                var deadline = DateTime.UtcNow.AddSeconds(3);
+                var deadline = DateTime.UtcNow.AddSeconds(Math.Max(0.5f, timeoutSeconds));
                 while (DateTime.UtcNow < deadline)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -891,7 +898,8 @@ namespace RemoteExplorer
                     return parsed;
                 }
 
-                throw new TimeoutException("Timed out waiting for server response.");
+                throw new TimeoutException(
+                    $"Timed out waiting for server response after {Math.Max(0.5f, timeoutSeconds):0.#}s.");
             }
             finally
             {

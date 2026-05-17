@@ -120,7 +120,7 @@ namespace RemoteExplorer
 
             if (offerTask.IsFaulted)
             {
-                completion.TrySetException(offerTask.Exception);
+                completion.TrySetException(UnwrapTaskException(offerTask.Exception));
                 yield break;
             }
 
@@ -197,6 +197,20 @@ namespace RemoteExplorer
             }
 
             updateCoroutine = StartCoroutine(WebRTC.Update());
+        }
+
+        private static Exception UnwrapTaskException(Exception exception)
+        {
+            var aggregate = exception as AggregateException;
+            if (aggregate == null)
+            {
+                return exception;
+            }
+
+            var flattened = aggregate.Flatten();
+            return flattened.InnerExceptions.Count == 1
+                ? flattened.InnerExceptions[0]
+                : flattened.GetBaseException();
         }
 
         private void OnTrack(RTCTrackEvent trackEvent)
