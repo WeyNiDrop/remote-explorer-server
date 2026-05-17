@@ -50,6 +50,15 @@ namespace RemoteExplorer
 
         public bool AddChunk(int index, byte[] packet, int offset, int length)
         {
+            bool completed;
+            return TryAddChunk(index, packet, offset, length, out completed) && completed;
+        }
+
+        public bool TryAddChunk(int index, byte[] packet, int offset, int length, out bool completed)
+        {
+            // 返回值表示分片是否被接受，completed 表示整帧是否拼完。
+            // Return value means the chunk was accepted; completed means the frame is now complete.
+            completed = false;
             if (index < 0 ||
                 index >= receivedChunkFlags.Length ||
                 receivedChunkFlags[index] ||
@@ -77,7 +86,8 @@ namespace RemoteExplorer
             }
 
             LastUpdatedUtc = DateTime.UtcNow;
-            return receivedChunks == receivedChunkFlags.Length && expectedBytes > 0;
+            completed = receivedChunks == receivedChunkFlags.Length && expectedBytes > 0;
+            return true;
         }
 
         public RemoteStreamFrame Build()

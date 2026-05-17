@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
@@ -16,6 +17,7 @@ from .streaming import BrowserStreamService
 from .webrtc import BrowserWebRtcService
 
 BrowserResponder = Callable[[dict[str, Any]], None]
+LOGGER = logging.getLogger("remote_explorer.browser")
 
 
 class BrowserWindow(QMainWindow):
@@ -350,18 +352,23 @@ class BrowserController:
         )
 
     def _stream_start(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
+        self._stop_webrtc_if_active()
         respond(_ok(self.stream_service.start(payload)))
 
     def _stream_stop(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
         respond(_ok(self.stream_service.stop()))
 
     def _stream_config(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
+        self._stop_webrtc_if_active()
         respond(_ok(self.stream_service.configure(payload)))
 
     def _stream_status(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
         respond(_ok(self.stream_service.status()))
 
     def _webrtc_offer(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
+        if self.stream_service.status().get("streaming"):
+            LOGGER.info("Stopping UDP/JPEG stream before accepting WebRTC offer")
+        self.stream_service.stop()
         self._respond_future(self.webrtc_service.offer_async(payload), respond)
 
     def _webrtc_stop(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
@@ -393,6 +400,13 @@ class BrowserController:
                 respond(_error("command_failed", str(exc)))
 
         future.add_done_callback(done)
+
+    def _stop_webrtc_if_active(self) -> None:
+        if not self.webrtc_service.has_peers():
+            return
+
+        LOGGER.info("Stopping WebRTC peers before starting UDP/JPEG stream")
+        self.webrtc_service.stop({})
 
 
 def _ok(result: dict[str, Any]) -> dict[str, Any]:

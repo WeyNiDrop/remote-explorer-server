@@ -9,6 +9,12 @@ using UnityEngine.UI;
 
 namespace RemoteExplorer
 {
+    public enum RemoteStreamMode
+    {
+        UdpJpeg,
+        WebRtc
+    }
+
     [DefaultExecutionOrder(-10000)]
     public class RemoteExplorerApp : MonoBehaviour
     {
@@ -17,6 +23,7 @@ namespace RemoteExplorer
         private const float StreamStatusIntervalSeconds = 0.5f;
         private const float StreamWatchdogSeconds = 12f;
         private const float StreamRestartCooldownSeconds = 12f;
+        private const float StreamRenderLogIntervalSeconds = 5f;
 
         private readonly RemoteExplorerClient client = new RemoteExplorerClient();
         private readonly List<DiscoveredServer> servers = new List<DiscoveredServer>();
@@ -37,6 +44,7 @@ namespace RemoteExplorer
         private Button backButton;
         private Button forwardButton;
         private Button reloadButton;
+        private Dropdown streamModeDropdown;
         private Dropdown streamResolutionDropdown;
         private Slider streamFpsSlider;
         private Text streamFpsText;
@@ -52,9 +60,21 @@ namespace RemoteExplorer
         private float lastStreamFrameAt = -1f;
         private float nextStreamStatusAt = -1f;
         private float nextStreamWatchdogAt = -1f;
+        private float streamRenderStatsSince = -1f;
+        private float nextStreamRenderLogAt = -1f;
+        private int streamRenderFrames;
+        private int streamRenderFrameGaps;
+        private float streamRenderDecodeMsTotal;
+        private float streamRenderDecodeMsMax;
+        private float streamRenderApplyMsTotal;
+        private float streamRenderApplyMsMax;
+        private uint streamRenderLastFrameId;
+        private bool streamRenderHasFrameId;
         private bool streamRestartInFlight;
         private bool streamSettingsDirty;
         private float streamSettingsApplyAt = -1f;
+        private RemoteStreamMode activeStreamMode = RemoteStreamMode.UdpJpeg;
+        private bool hasActiveStreamMode;
         private bool canvasReady;
         private string fallbackPassword = string.Empty;
         private string fallbackUrl = "https://example.com";
@@ -63,6 +83,7 @@ namespace RemoteExplorer
 
         private void Awake()
         {
+            RemoteExplorerDiagnostics.Initialize();
             lifetime = new CancellationTokenSource();
             settings = RemoteExplorerSettings.Load();
             fallbackPassword = settings.Password ?? string.Empty;
@@ -71,7 +92,7 @@ namespace RemoteExplorer
                 BuildUi();
                 ApplySettingsToUi();
                 canvasReady = true;
-                Debug.Log("[RemoteExplorer] Canvas UI created.");
+                RemoteExplorerDiagnostics.Info("Canvas UI created.");
             }
             catch (Exception ex)
             {
@@ -255,6 +276,23 @@ namespace RemoteExplorer
             closeButton = CreateCompactButton(urlRow.transform, "Close", CloseButtonClicked, 110);
 
             var streamOptionsRow = CreateCompactRow(parent, "Stream Options Row", 50);
+            streamModeDropdown = CreateDropdown(streamOptionsRow.transform);
+            var modeLayout = streamModeDropdown.GetComponent<LayoutElement>() ??
+                streamModeDropdown.gameObject.AddComponent<LayoutElement>();
+            modeLayout.minWidth = 178;
+            modeLayout.preferredWidth = 178;
+            modeLayout.flexibleWidth = 0;
+            streamModeDropdown.ClearOptions();
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            streamModeDropdown.AddOptions(new List<string> { "WebRTC/H.264", "UDP/JPEG" });
+            streamModeDropdown.value = PreferredStreamModeIndex(settings.StreamMode);
+#else
+            streamModeDropdown.AddOptions(new List<string> { "UDP/JPEG" });
+            streamModeDropdown.value = 0;
+            streamModeDropdown.interactable = false;
+#endif
+            streamModeDropdown.onValueChanged.AddListener(_ => ScheduleStreamSettingsApply());
+
             streamResolutionDropdown = CreateDropdown(streamOptionsRow.transform);
             var dropdownLayout = streamResolutionDropdown.GetComponent<LayoutElement>() ??
                 streamResolutionDropdown.gameObject.AddComponent<LayoutElement>();
@@ -452,8 +490,25 @@ namespace RemoteExplorer
                 return;
             }
 
+            var mode = SelectedStreamMode();
             var resolution = SelectedStreamResolution();
             var fps = SelectedStreamFps();
+            RemoteExplorerDiagnostics.Info($"Stream start requested mode={StreamModeLabel(mode)} resolution={resolution} fps={fps}");
+            // 切换模式前先关掉另一条传输，避免两路串流争抢服务端抓图资源。
+            // Stop the inactive transport first so both modes do not compete for server captures.
+            await StopInactiveStreamTransportsAsync(mode);
+
+            if (mode == RemoteStreamMode.WebRtc)
+            {
+                await StartWebRtcStreamAsync(resolution, fps);
+                return;
+            }
+
+            await StartUdpStreamAsync(resolution, fps);
+        }
+
+        private async Task StartWebRtcStreamAsync(string resolution, int fps)
+        {
 #if REMOTE_EXPLORER_HAS_WEBRTC
             if (webRtcPlayback == null)
             {
@@ -470,6 +525,9 @@ namespace RemoteExplorer
                 if (webRtcResult.ok || webRtcResult.type == "result")
                 {
                     SetButtonLabel(streamToggleButton, "Stop");
+                    activeStreamMode = RemoteStreamMode.WebRtc;
+                    hasActiveStreamMode = true;
+                    ResetStreamRenderStats();
                     MarkStreamFrameClock();
                     SetStreamStatus($"WebRTC {resolution} / {fps}fps");
                     SetStatus("WebRTC stream started");
@@ -489,9 +547,15 @@ namespace RemoteExplorer
                 SetStatus("WebRTC stream failed: " + ex.Message);
                 SetButtonLabel(streamToggleButton, "Start");
             }
-            return;
 #else
+            SetStreamStatus("WebRTC is not available in this client build");
+            SetStatus("WebRTC is not available in this client build");
+            SetButtonLabel(streamToggleButton, "Start");
+#endif
+        }
 
+        private async Task StartUdpStreamAsync(string resolution, int fps)
+        {
             SetStatus($"Starting image stream {resolution} at {fps} fps");
             try
             {
@@ -503,6 +567,9 @@ namespace RemoteExplorer
                 if (result.ok || result.type == "result")
                 {
                     SetButtonLabel(streamToggleButton, "Stop");
+                    activeStreamMode = RemoteStreamMode.UdpJpeg;
+                    hasActiveStreamMode = true;
+                    ResetStreamRenderStats();
                     MarkStreamFrameClock();
                     SetStreamStatus($"Waiting for {resolution} / {fps}fps frames...");
                     SetStatus("Stream started");
@@ -516,36 +583,81 @@ namespace RemoteExplorer
             {
                 SetStatus("Stream failed: " + ex.Message);
             }
-#endif
         }
 
         private async Task StopStreamAsync()
         {
-            try
-            {
-#if REMOTE_EXPLORER_HAS_WEBRTC
-                if (webRtcPlayback != null && webRtcPlayback.IsActive)
-                {
-                    await webRtcPlayback.StopAsync(lifetime.Token);
-                }
-#endif
-                if (client.IsStreaming)
-                {
-                    await client.StopStreamAsync(lifetime.Token);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning("[RemoteExplorer] Stop stream failed: " + ex.Message);
-            }
-
+            await StopAllStreamTransportsAsync();
             SetButtonLabel(streamToggleButton, "Start");
             SetStreamStatus("Stream stopped");
             SetStatus("Stream stopped");
             lastStreamFrameAt = -1f;
             nextStreamWatchdogAt = -1f;
             streamRestartInFlight = false;
+            hasActiveStreamMode = false;
+            ResetStreamRenderStats();
         }
+
+        private async Task StopInactiveStreamTransportsAsync(RemoteStreamMode targetMode)
+        {
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            if (targetMode != RemoteStreamMode.WebRtc)
+            {
+                await StopWebRtcTransportAsync();
+            }
+#endif
+
+            if (targetMode != RemoteStreamMode.UdpJpeg)
+            {
+                await StopUdpStreamTransportAsync();
+            }
+        }
+
+        private async Task StopAllStreamTransportsAsync()
+        {
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            await StopWebRtcTransportAsync();
+#endif
+            await StopUdpStreamTransportAsync();
+        }
+
+        private async Task StopUdpStreamTransportAsync()
+        {
+            if (!client.IsStreaming)
+            {
+                return;
+            }
+
+            try
+            {
+                RemoteExplorerDiagnostics.Info("UDP/JPEG transport stop begin.");
+                await client.StopStreamAsync(lifetime.Token);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[RemoteExplorer] Image stream stop failed: " + ex.Message);
+            }
+        }
+
+#if REMOTE_EXPLORER_HAS_WEBRTC
+        private async Task StopWebRtcTransportAsync()
+        {
+            if (webRtcPlayback == null || !webRtcPlayback.IsActive)
+            {
+                return;
+            }
+
+            try
+            {
+                RemoteExplorerDiagnostics.Info("WebRTC transport stop begin.");
+                await webRtcPlayback.StopAsync(lifetime.Token);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[RemoteExplorer] WebRTC stop failed: " + ex.Message);
+            }
+        }
+#endif
 
         private async Task ApplyStreamSettingsAsync()
         {
@@ -556,11 +668,29 @@ namespace RemoteExplorer
 
             var resolution = SelectedStreamResolution();
             var fps = SelectedStreamFps();
+            var selectedMode = SelectedStreamMode();
+            var activeMode = ActiveStreamModeOrSelected();
+
+            if (selectedMode != activeMode)
+            {
+                RemoteExplorerDiagnostics.Info($"Stream mode change active={StreamModeLabel(activeMode)} selected={StreamModeLabel(selectedMode)}");
+                SetStreamStatus($"Switching to {StreamModeLabel(selectedMode)}...");
+                await StopAllStreamTransportsAsync();
+                hasActiveStreamMode = false;
+                lastStreamFrameAt = -1f;
+                nextStreamWatchdogAt = -1f;
+                ResetStreamRenderStats();
+                await StartStreamAsync();
+                return;
+            }
+
 #if REMOTE_EXPLORER_HAS_WEBRTC
-            if (webRtcPlayback != null && webRtcPlayback.IsActive)
+            if (selectedMode == RemoteStreamMode.WebRtc)
             {
                 SetStreamStatus($"Applying WebRTC {resolution} / {fps}fps...");
-                await StopStreamAsync();
+                await StopAllStreamTransportsAsync();
+                hasActiveStreamMode = false;
+                ResetStreamRenderStats();
                 await StartStreamAsync();
                 return;
             }
@@ -596,6 +726,15 @@ namespace RemoteExplorer
                 return;
             }
 
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            // Unity WebRTC 的 OnVideoReceived 不是逐帧心跳，不能用它判断卡死。
+            // Unity WebRTC OnVideoReceived is not a per-frame heartbeat, so do not watchdog it here.
+            if (webRtcPlayback != null && webRtcPlayback.IsActive)
+            {
+                return;
+            }
+#endif
+
             if (lastStreamFrameAt < 0f || Time.unscaledTime < nextStreamWatchdogAt)
             {
                 return;
@@ -620,32 +759,13 @@ namespace RemoteExplorer
 
             streamRestartInFlight = true;
             SetStreamStatus("Stream stalled; restarting...");
+            RemoteExplorerDiagnostics.Info(
+                $"Stream watchdog restart last_frame_age={(Time.unscaledTime - lastStreamFrameAt):0.0}s mode={StreamModeLabel(ActiveStreamModeOrSelected())}");
             try
             {
-#if REMOTE_EXPLORER_HAS_WEBRTC
-                if (webRtcPlayback != null && webRtcPlayback.IsActive)
-                {
-                    try
-                    {
-                        await webRtcPlayback.StopAsync(lifetime.Token);
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogWarning("[RemoteExplorer] WebRTC stop timed out during restart: " + ex.Message);
-                    }
-                }
-#endif
-                if (client.IsStreaming)
-                {
-                    try
-                    {
-                        await client.StopStreamAsync(lifetime.Token);
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogWarning("[RemoteExplorer] Image stream stop timed out during restart: " + ex.Message);
-                    }
-                }
+                await StopAllStreamTransportsAsync();
+                hasActiveStreamMode = false;
+                ResetStreamRenderStats();
                 if (!client.IsConnected)
                 {
                     return;
@@ -679,6 +799,23 @@ namespace RemoteExplorer
 #endif
         }
 
+        private RemoteStreamMode ActiveStreamModeOrSelected()
+        {
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            if (webRtcPlayback != null && webRtcPlayback.IsActive)
+            {
+                return RemoteStreamMode.WebRtc;
+            }
+#endif
+
+            if (client.IsStreaming)
+            {
+                return RemoteStreamMode.UdpJpeg;
+            }
+
+            return hasActiveStreamMode ? activeStreamMode : SelectedStreamMode();
+        }
+
         private async Task ClickPreviewAsync(Vector2 normalized)
         {
             if (!client.IsConnected)
@@ -699,8 +836,8 @@ namespace RemoteExplorer
             var x = Mathf.Clamp01(visibleX) * latestSourceWidth;
             var y = (1f - Mathf.Clamp01(visibleY)) * latestSourceHeight;
             SetStreamStatus($"Tap {Mathf.RoundToInt(x)}, {Mathf.RoundToInt(y)}");
-            Debug.Log(
-                $"[RemoteExplorer] Stream tap normalized=({normalized.x:F3},{normalized.y:F3}) uv=({visibleX:F3},{visibleY:F3}) viewport=({Mathf.RoundToInt(x)},{Mathf.RoundToInt(y)}) source={latestSourceWidth}x{latestSourceHeight}");
+            RemoteExplorerDiagnostics.Info(
+                $"Stream tap normalized=({normalized.x:F3},{normalized.y:F3}) uv=({visibleX:F3},{visibleY:F3}) viewport=({Mathf.RoundToInt(x)},{Mathf.RoundToInt(y)}) source={latestSourceWidth}x{latestSourceHeight}");
             await RunCommandAsync(
                 () => client.ClickAsync(x, y, latestSourceWidth, latestSourceHeight, lifetime.Token),
                 $"Clicked {Mathf.RoundToInt(x)}, {Mathf.RoundToInt(y)}");
@@ -748,12 +885,18 @@ namespace RemoteExplorer
             {
                 urlInput.text = fallbackUrl;
             }
+
+            if (streamModeDropdown != null)
+            {
+                streamModeDropdown.value = PreferredStreamModeIndex(settings.StreamMode);
+            }
         }
 
         private void SaveSettings()
         {
             settings.Password = passwordInput.text;
             settings.AutoConnect = autoConnectToggle.isOn;
+            settings.StreamMode = StreamModePreference(SelectedStreamMode());
             if (SelectedServer() != null)
             {
                 var server = SelectedServer();
@@ -879,7 +1022,7 @@ namespace RemoteExplorer
         private void SetStatus(string message)
         {
             currentStatus = message;
-            Debug.Log("[RemoteExplorer] " + message);
+            RemoteExplorerDiagnostics.Info("Status: " + message);
             if (statusText != null)
             {
                 statusText.text = message;
@@ -911,11 +1054,15 @@ namespace RemoteExplorer
                 streamTexture = new Texture2D(2, 2, TextureFormat.RGB24, false);
             }
 
+            var decodeStartedAt = Time.realtimeSinceStartup;
             if (!streamTexture.LoadImage(frame.JpegData))
             {
                 SetStreamStatus("Could not decode stream frame");
+                Debug.LogWarning(
+                    $"[RemoteExplorer] UDP/JPEG decode failed frame={frame.FrameId} jpeg_bytes={frame.JpegData.Length}");
                 return;
             }
+            var decodeMs = (Time.realtimeSinceStartup - decodeStartedAt) * 1000f;
 
             latestSourceWidth = Mathf.Max(1, frame.SourceWidth);
             latestSourceHeight = Mathf.Max(1, frame.SourceHeight);
@@ -923,7 +1070,10 @@ namespace RemoteExplorer
             streamImage.color = Color.white;
             MarkStreamFrameClock();
 
+            var applyStartedAt = Time.realtimeSinceStartup;
             ApplyStreamFit(frame);
+            var applyMs = (Time.realtimeSinceStartup - applyStartedAt) * 1000f;
+            RecordStreamRenderFrame(frame.FrameId, decodeMs, applyMs, frame.JpegData.Length, frame.Width, frame.Height);
 
             if (Time.unscaledTime >= nextStreamStatusAt)
             {
@@ -931,6 +1081,73 @@ namespace RemoteExplorer
                 SetStreamStatus(
                     $"Stream #{frame.FrameId} {frame.Width}x{frame.Height} | source {latestSourceWidth}x{latestSourceHeight}");
             }
+        }
+
+        private void ResetStreamRenderStats()
+        {
+            streamRenderStatsSince = Time.unscaledTime;
+            nextStreamRenderLogAt = Time.unscaledTime + StreamRenderLogIntervalSeconds;
+            streamRenderFrames = 0;
+            streamRenderFrameGaps = 0;
+            streamRenderDecodeMsTotal = 0f;
+            streamRenderDecodeMsMax = 0f;
+            streamRenderApplyMsTotal = 0f;
+            streamRenderApplyMsMax = 0f;
+            streamRenderLastFrameId = 0;
+            streamRenderHasFrameId = false;
+        }
+
+        private void RecordStreamRenderFrame(
+            uint frameId,
+            float decodeMs,
+            float applyMs,
+            int jpegBytes,
+            int width,
+            int height)
+        {
+            if (streamRenderStatsSince < 0f)
+            {
+                ResetStreamRenderStats();
+            }
+
+            if (streamRenderHasFrameId && IsFrameIdNewer(frameId, streamRenderLastFrameId))
+            {
+                var delta = unchecked((int)(frameId - streamRenderLastFrameId));
+                if (delta > 1)
+                {
+                    streamRenderFrameGaps += delta - 1;
+                }
+            }
+
+            streamRenderFrames++;
+            streamRenderLastFrameId = frameId;
+            streamRenderHasFrameId = true;
+            streamRenderDecodeMsTotal += decodeMs;
+            streamRenderDecodeMsMax = Mathf.Max(streamRenderDecodeMsMax, decodeMs);
+            streamRenderApplyMsTotal += applyMs;
+            streamRenderApplyMsMax = Mathf.Max(streamRenderApplyMsMax, applyMs);
+
+            if (Time.unscaledTime < nextStreamRenderLogAt)
+            {
+                return;
+            }
+
+            var elapsed = Mathf.Max(0.001f, Time.unscaledTime - streamRenderStatsSince);
+            RemoteExplorerDiagnostics.Info(
+                "UDP/JPEG render stats " +
+                $"elapsed={elapsed:0.0}s frames={streamRenderFrames} fps={(streamRenderFrames / elapsed):0.0} " +
+                $"frame_gaps={streamRenderFrameGaps} decode_ms={(streamRenderDecodeMsTotal / Mathf.Max(1, streamRenderFrames)):0.0}/{streamRenderDecodeMsMax:0.0} " +
+                $"apply_ms={(streamRenderApplyMsTotal / Mathf.Max(1, streamRenderFrames)):0.0}/{streamRenderApplyMsMax:0.0} " +
+                $"last_frame={frameId} size={width}x{height} jpeg_bytes={jpegBytes}");
+
+            streamRenderStatsSince = Time.unscaledTime;
+            nextStreamRenderLogAt = Time.unscaledTime + StreamRenderLogIntervalSeconds;
+            streamRenderFrames = 0;
+            streamRenderFrameGaps = 0;
+            streamRenderDecodeMsTotal = 0f;
+            streamRenderDecodeMsMax = 0f;
+            streamRenderApplyMsTotal = 0f;
+            streamRenderApplyMsMax = 0f;
         }
 
         private void ApplyStreamFit(RemoteStreamFrame frame)
@@ -1314,6 +1531,60 @@ namespace RemoteExplorer
             return streamResolutionDropdown.options[index].text;
         }
 
+        private RemoteStreamMode SelectedStreamMode()
+        {
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            if (streamModeDropdown == null || streamModeDropdown.options.Count == 0)
+            {
+                return StreamModeFromPreference(settings.StreamMode);
+            }
+
+            var index = Mathf.Clamp(streamModeDropdown.value, 0, streamModeDropdown.options.Count - 1);
+            var label = streamModeDropdown.options[index].text ?? string.Empty;
+            return label.StartsWith("UDP", StringComparison.OrdinalIgnoreCase)
+                ? RemoteStreamMode.UdpJpeg
+                : RemoteStreamMode.WebRtc;
+#else
+            return RemoteStreamMode.UdpJpeg;
+#endif
+        }
+
+        private static int PreferredStreamModeIndex(string mode)
+        {
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            return StreamModeFromPreference(mode) == RemoteStreamMode.UdpJpeg ? 1 : 0;
+#else
+            return 0;
+#endif
+        }
+
+        private static RemoteStreamMode StreamModeFromPreference(string mode)
+        {
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            return string.Equals(mode, "udp", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(mode, "udp_jpeg", StringComparison.OrdinalIgnoreCase)
+                ? RemoteStreamMode.UdpJpeg
+                : RemoteStreamMode.WebRtc;
+#else
+            return RemoteStreamMode.UdpJpeg;
+#endif
+        }
+
+        private static string StreamModePreference(RemoteStreamMode mode)
+        {
+            return mode == RemoteStreamMode.WebRtc ? "webrtc" : "udp";
+        }
+
+        private static string StreamModeLabel(RemoteStreamMode mode)
+        {
+            return mode == RemoteStreamMode.WebRtc ? "WebRTC" : "UDP/JPEG";
+        }
+
+        private static bool IsFrameIdNewer(uint candidate, uint baseline)
+        {
+            return candidate != baseline && unchecked((int)(candidate - baseline)) > 0;
+        }
+
         private int SelectedStreamFps()
         {
             if (streamFpsSlider == null)
@@ -1336,6 +1607,8 @@ namespace RemoteExplorer
         private void ScheduleStreamSettingsApply()
         {
             UpdateStreamFpsLabel();
+            settings.StreamMode = StreamModePreference(SelectedStreamMode());
+            settings.Save();
             if (!IsStreamActive())
             {
                 return;

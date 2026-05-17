@@ -32,14 +32,32 @@ namespace RemoteExplorer
         private Task streamReceiveTask;
         private int streamPort;
         private int streamGeneration;
+        private DateTime streamStatsSinceUtc;
+        private DateTime nextStreamStatsLogUtc;
+        private long streamStatsPackets;
+        private long streamStatsBytes;
+        private long streamStatsFrames;
+        private long streamStatsFrameGaps;
+        private long streamStatsPartialsCreated;
+        private long streamStatsPartialPruned;
+        private long streamStatsInvalidPackets;
+        private long streamStatsInvalidChunks;
+        private long streamStatsGenerationDrops;
+        private long streamStatsBehindPackets;
+        private long streamStatsObsoletePackets;
+        private long streamStatsMismatchedFrames;
+        private long streamStatsChunkAddFailures;
+        private uint streamStatsLastCompletedFrameId;
+        private bool streamStatsHasCompletedFrameId;
 
         private static readonly byte[] StreamMagic = Encoding.ASCII.GetBytes("REXPSTR1");
         private const int StreamHeaderBytes = 24;
         private const int StreamChunkBytes = 1000;
         private const int MaxStreamChunks = 512;
-        private const int StreamReceiveBufferBytes = 384 * 1024;
+        private const int StreamReceiveBufferBytes = 2 * 1024 * 1024;
         private const int MaxReceiveBurstPackets = 256;
         private const int SioUdpConnectionReset = -1744830452;
+        private const double StreamStatsIntervalSeconds = 5.0;
         private const float DefaultControlTimeoutSeconds = 3f;
         private const float WebRtcOfferTimeoutSeconds = 15f;
         private const float WebRtcStopTimeoutSeconds = 8f;
@@ -353,7 +371,10 @@ namespace RemoteExplorer
             }
 
             streamPort = localEndpoint.Port;
+            RemoteExplorerDiagnostics.Info(
+                $"UDP/JPEG stream local socket opened port={streamPort} resolution={resolution} fps={ClampStreamFps(fps)} quality={quality}");
             streamCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            // generation 用于丢弃旧 socket 关闭后迟到的 UDP 包。 / Generation drops late packets from an old socket.
             var localStreamGeneration = BeginLocalStreamState();
             streamReceiveTask = ReceiveStreamLoopAsync(streamClient, streamCancellation.Token, localStreamGeneration);
 
@@ -370,7 +391,13 @@ namespace RemoteExplorer
 
             if (!result.ok && result.type != "result")
             {
+                var error = result.error != null ? $"{result.error.code}: {result.error.message}" : "Unknown error";
+                Debug.LogWarning("[RemoteExplorer] UDP/JPEG stream_start failed: " + error);
                 StopLocalStream();
+            }
+            else
+            {
+                RemoteExplorerDiagnostics.Info("UDP/JPEG stream_start accepted by server.");
             }
 
             return result;
@@ -387,6 +414,8 @@ namespace RemoteExplorer
                 return await StartStreamAsync(resolution, fps, quality, cancellationToken);
             }
 
+            RemoteExplorerDiagnostics.Info(
+                $"UDP/JPEG stream_config resolution={resolution} fps={ClampStreamFps(fps)} quality={quality} port={streamPort}");
             return await SendCommandAsync(
                 "stream_config",
                 new Dictionary<string, object>
@@ -406,6 +435,7 @@ namespace RemoteExplorer
             {
                 if (IsConnected)
                 {
+                    RemoteExplorerDiagnostics.Info("UDP/JPEG stream_stop requested.");
                     result = await SendCommandAsync("stream_stop", new Dictionary<string, object>(), cancellationToken);
                 }
             }
@@ -527,6 +557,14 @@ namespace RemoteExplorer
 
         private void StopLocalStream()
         {
+            if (streamClient != null)
+            {
+                lock (streamLock)
+                {
+                    LogStreamReceiveStats("stop", true);
+                }
+            }
+
             streamCancellation?.Cancel();
             streamClient?.Close();
             streamClient?.Dispose();
@@ -549,6 +587,7 @@ namespace RemoteExplorer
             {
                 streamGeneration++;
                 ClearStreamFrameState();
+                ResetStreamStats();
                 return streamGeneration;
             }
         }
@@ -561,6 +600,28 @@ namespace RemoteExplorer
             hasCompletedStreamFrame = false;
             newestObservedFrameId = 0;
             hasNewestObservedFrameId = false;
+        }
+
+        private void ResetStreamStats()
+        {
+            var now = DateTime.UtcNow;
+            streamStatsSinceUtc = now;
+            nextStreamStatsLogUtc = now.AddSeconds(StreamStatsIntervalSeconds);
+            streamStatsPackets = 0;
+            streamStatsBytes = 0;
+            streamStatsFrames = 0;
+            streamStatsFrameGaps = 0;
+            streamStatsPartialsCreated = 0;
+            streamStatsPartialPruned = 0;
+            streamStatsInvalidPackets = 0;
+            streamStatsInvalidChunks = 0;
+            streamStatsGenerationDrops = 0;
+            streamStatsBehindPackets = 0;
+            streamStatsObsoletePackets = 0;
+            streamStatsMismatchedFrames = 0;
+            streamStatsChunkAddFailures = 0;
+            streamStatsLastCompletedFrameId = 0;
+            streamStatsHasCompletedFrameId = false;
         }
 
         private async Task ReceiveStreamLoopAsync(
@@ -635,50 +696,68 @@ namespace RemoteExplorer
 
         private void AcceptStreamPacket(byte[] packet, int generation)
         {
-            if (packet == null || packet.Length <= StreamHeaderBytes)
-            {
-                return;
-            }
-
-            for (var i = 0; i < StreamMagic.Length; i++)
-            {
-                if (packet[i] != StreamMagic[i])
-                {
-                    return;
-                }
-            }
-
-            var frameId = ReadUInt32(packet, 8);
-            var chunkIndex = ReadUInt16(packet, 12);
-            var chunkCount = ReadUInt16(packet, 14);
-            var width = ReadUInt16(packet, 16);
-            var height = ReadUInt16(packet, 18);
-            var sourceWidth = ReadUInt16(packet, 20);
-            var sourceHeight = ReadUInt16(packet, 22);
-
-            if (chunkCount == 0 || chunkCount > MaxStreamChunks || chunkIndex >= chunkCount)
-            {
-                return;
-            }
-
             lock (streamLock)
             {
+                // UDP 分片可能乱序/丢失；只保留最新帧相关分片，降低延迟。
+                // UDP chunks can arrive out of order or be lost; keep only chunks for the newest frames.
+                if (packet == null || packet.Length <= StreamHeaderBytes)
+                {
+                    streamStatsInvalidPackets++;
+                    LogStreamReceiveStats("interval");
+                    return;
+                }
+
+                streamStatsPackets++;
+                streamStatsBytes += packet.Length;
+
+                for (var i = 0; i < StreamMagic.Length; i++)
+                {
+                    if (packet[i] != StreamMagic[i])
+                    {
+                        streamStatsInvalidPackets++;
+                        LogStreamReceiveStats("interval");
+                        return;
+                    }
+                }
+
+                var frameId = ReadUInt32(packet, 8);
+                var chunkIndex = ReadUInt16(packet, 12);
+                var chunkCount = ReadUInt16(packet, 14);
+                var width = ReadUInt16(packet, 16);
+                var height = ReadUInt16(packet, 18);
+                var sourceWidth = ReadUInt16(packet, 20);
+                var sourceHeight = ReadUInt16(packet, 22);
+
+                if (chunkCount == 0 || chunkCount > MaxStreamChunks || chunkIndex >= chunkCount)
+                {
+                    streamStatsInvalidChunks++;
+                    LogStreamReceiveStats("interval");
+                    return;
+                }
+
                 if (generation != streamGeneration)
                 {
+                    streamStatsGenerationDrops++;
+                    LogStreamReceiveStats("interval");
                     return;
                 }
 
                 if (MarkNewestObservedFrameId(frameId))
                 {
-                    RemovePartialFramesOlderThan(frameId);
+                    // 新帧到达后清理旧半帧，不等待完整旧帧。 / Once a newer frame arrives, discard older partial frames.
+                    streamStatsPartialPruned += RemovePartialFramesOlderThan(frameId);
                 }
                 else if (IsBehindNewestObservedFrameId(frameId))
                 {
+                    streamStatsBehindPackets++;
+                    LogStreamReceiveStats("interval");
                     return;
                 }
 
                 if (IsObsoleteFrameId(frameId))
                 {
+                    streamStatsObsoletePackets++;
+                    LogStreamReceiveStats("interval");
                     return;
                 }
 
@@ -694,6 +773,7 @@ namespace RemoteExplorer
                         sourceWidth,
                         sourceHeight);
                     partialStreamFrames[frameId] = builder;
+                    streamStatsPartialsCreated++;
                 }
 
                 if (builder.ChunkCount != chunkCount ||
@@ -703,14 +783,25 @@ namespace RemoteExplorer
                     builder.SourceHeight != sourceHeight)
                 {
                     partialStreamFrames.Remove(frameId);
+                    streamStatsMismatchedFrames++;
+                    LogStreamReceiveStats("interval");
                     return;
                 }
 
-                if (builder.AddChunk(
+                bool completed;
+                if (!builder.TryAddChunk(
                         chunkIndex,
                         packet,
                         StreamHeaderBytes,
-                        packet.Length - StreamHeaderBytes))
+                        packet.Length - StreamHeaderBytes,
+                        out completed))
+                {
+                    streamStatsChunkAddFailures++;
+                    LogStreamReceiveStats("interval");
+                    return;
+                }
+
+                if (completed)
                 {
                     var completedFrame = builder.Build();
                     partialStreamFrames.Remove(frameId);
@@ -720,10 +811,12 @@ namespace RemoteExplorer
                         latestCompletedStreamFrame = completedFrame;
                         latestCompletedFrameId = completedFrame.FrameId;
                         hasCompletedStreamFrame = true;
+                        RecordCompletedStreamFrame(completedFrame.FrameId);
                     }
                 }
 
                 PrunePartialFrames();
+                LogStreamReceiveStats("interval");
             }
         }
 
@@ -741,6 +834,7 @@ namespace RemoteExplorer
             {
                 partialStreamFrames.Remove(frameId);
             }
+            streamStatsPartialPruned += stale.Count;
 
             if (partialStreamFrames.Count > 10)
             {
@@ -753,6 +847,7 @@ namespace RemoteExplorer
                 {
                     partialStreamFrames.Remove(frameId);
                 }
+                streamStatsPartialPruned += overflow.Count;
             }
         }
 
@@ -773,7 +868,7 @@ namespace RemoteExplorer
             return hasNewestObservedFrameId && IsFrameIdNewer(newestObservedFrameId, frameId);
         }
 
-        private void RemovePartialFramesOlderThan(uint frameId)
+        private int RemovePartialFramesOlderThan(uint frameId)
         {
             var stale = partialStreamFrames
                 .Where(pair => IsFrameIdNewer(frameId, pair.Key))
@@ -783,11 +878,70 @@ namespace RemoteExplorer
             {
                 partialStreamFrames.Remove(staleFrameId);
             }
+
+            return stale.Count;
         }
 
         private bool IsObsoleteFrameId(uint frameId)
         {
             return hasCompletedStreamFrame && !IsFrameIdNewer(frameId, latestCompletedFrameId);
+        }
+
+        private void RecordCompletedStreamFrame(uint frameId)
+        {
+            if (streamStatsHasCompletedFrameId && IsFrameIdNewer(frameId, streamStatsLastCompletedFrameId))
+            {
+                var delta = unchecked((int)(frameId - streamStatsLastCompletedFrameId));
+                if (delta > 1)
+                {
+                    streamStatsFrameGaps += delta - 1;
+                }
+            }
+
+            streamStatsFrames++;
+            streamStatsLastCompletedFrameId = frameId;
+            streamStatsHasCompletedFrameId = true;
+        }
+
+        private void LogStreamReceiveStats(string reason, bool force = false)
+        {
+            if (streamStatsSinceUtc == default(DateTime))
+            {
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            if (!force && now < nextStreamStatsLogUtc)
+            {
+                return;
+            }
+
+            var elapsed = Math.Max(0.001, (now - streamStatsSinceUtc).TotalSeconds);
+            RemoteExplorerDiagnostics.Info(
+                "UDP/JPEG receive stats " +
+                $"reason={reason} elapsed={elapsed:0.0}s packets={streamStatsPackets} bytes={streamStatsBytes} " +
+                $"frames={streamStatsFrames} fps={(streamStatsFrames / elapsed):0.0} frame_gaps={streamStatsFrameGaps} " +
+                $"partials={partialStreamFrames.Count} partials_created={streamStatsPartialsCreated} partials_pruned={streamStatsPartialPruned} " +
+                $"invalid_packets={streamStatsInvalidPackets} invalid_chunks={streamStatsInvalidChunks} " +
+                $"generation_drops={streamStatsGenerationDrops} behind_packets={streamStatsBehindPackets} " +
+                $"obsolete_packets={streamStatsObsoletePackets} mismatched_frames={streamStatsMismatchedFrames} " +
+                $"chunk_add_failures={streamStatsChunkAddFailures} last_frame={streamStatsLastCompletedFrameId}");
+
+            streamStatsSinceUtc = now;
+            nextStreamStatsLogUtc = now.AddSeconds(StreamStatsIntervalSeconds);
+            streamStatsPackets = 0;
+            streamStatsBytes = 0;
+            streamStatsFrames = 0;
+            streamStatsFrameGaps = 0;
+            streamStatsPartialsCreated = 0;
+            streamStatsPartialPruned = 0;
+            streamStatsInvalidPackets = 0;
+            streamStatsInvalidChunks = 0;
+            streamStatsGenerationDrops = 0;
+            streamStatsBehindPackets = 0;
+            streamStatsObsoletePackets = 0;
+            streamStatsMismatchedFrames = 0;
+            streamStatsChunkAddFailures = 0;
         }
 
         // Frame ids are unsigned on the wire; signed delta preserves order across wraparound.
@@ -805,6 +959,7 @@ namespace RemoteExplorer
 
             try
             {
+                // 大缓冲吸收高分辨率 JPEG 的 UDP 分片突发。 / Larger buffer absorbs high-resolution JPEG chunk bursts.
                 socket.ReceiveBufferSize = StreamReceiveBufferBytes;
                 socket.IOControl((IOControlCode)SioUdpConnectionReset, new byte[] { 0, 0, 0, 0 }, null);
             }

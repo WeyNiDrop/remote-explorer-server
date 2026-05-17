@@ -356,12 +356,14 @@ namespace RemoteExplorer
         private const string KeyServerId = "RemoteExplorer.ServerId";
         private const string KeyServerHost = "RemoteExplorer.ServerHost";
         private const string KeyServerPort = "RemoteExplorer.ServerPort";
+        private const string KeyStreamMode = "RemoteExplorer.StreamMode";
 
         public string Password;
         public bool AutoConnect;
         public string ServerId;
         public string ServerHost;
         public int ServerPort = RemoteExplorerProtocol.DefaultControlPort;
+        public string StreamMode = "webrtc";
 
         public static RemoteExplorerSettings Load()
         {
@@ -371,7 +373,8 @@ namespace RemoteExplorer
                 AutoConnect = PlayerPrefs.GetInt(KeyAutoConnect, 0) == 1,
                 ServerId = PlayerPrefs.GetString(KeyServerId, string.Empty),
                 ServerHost = PlayerPrefs.GetString(KeyServerHost, string.Empty),
-                ServerPort = PlayerPrefs.GetInt(KeyServerPort, RemoteExplorerProtocol.DefaultControlPort)
+                ServerPort = PlayerPrefs.GetInt(KeyServerPort, RemoteExplorerProtocol.DefaultControlPort),
+                StreamMode = PlayerPrefs.GetString(KeyStreamMode, "webrtc")
             };
         }
 
@@ -382,6 +385,7 @@ namespace RemoteExplorer
             PlayerPrefs.SetString(KeyServerId, ServerId ?? string.Empty);
             PlayerPrefs.SetString(KeyServerHost, ServerHost ?? string.Empty);
             PlayerPrefs.SetInt(KeyServerPort, ServerPort);
+            PlayerPrefs.SetString(KeyStreamMode, string.IsNullOrEmpty(StreamMode) ? "webrtc" : StreamMode);
             PlayerPrefs.Save();
         }
     }

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
+import time
 import uuid
 from concurrent.futures import Future
-from fractions import Fraction
 from typing import Any
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSize, Qt, Signal, Slot
 from PySide6.QtGui import QImage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
@@ -20,6 +21,9 @@ from .streaming import (
     RESOLUTIONS,
     _clamp_int,
 )
+
+WEBRTC_LOG_INTERVAL_SECONDS = 5.0
+LOGGER = logging.getLogger("remote_explorer.webrtc")
 
 try:
     import av
@@ -39,14 +43,14 @@ else:
 
 class BrowserWebRtcService(QObject):
     stop_capture_requested = Signal()
+    # 跨线程抓图请求必须回到 Qt 主线程执行。 / Cross-thread capture requests must run on the Qt main thread.
+    capture_requested = Signal(object)
 
     def __init__(self, view: QWebEngineView, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.view = view
-        self.capture_timer = QTimer(self)
-        self.capture_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self.capture_timer.timeout.connect(self._capture_frame)
         self.stop_capture_requested.connect(self._stop_capture_if_idle)
+        self.capture_requested.connect(self._capture_requested)
         self.capture_width = 640
         self.capture_height = 360
         self.capture_fps = DEFAULT_STREAM_FPS
@@ -57,6 +61,8 @@ class BrowserWebRtcService(QObject):
         self.loop_thread: threading.Thread | None = None
         self.loop_ready = threading.Event()
         self.peer_connections: dict[str, Any] = {}
+        self.stats_lock = threading.Lock()
+        self._reset_stats()
 
     def offer(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.offer_async(payload).result(timeout=10)
@@ -70,6 +76,14 @@ class BrowserWebRtcService(QObject):
 
         width, height, resolution = _resolve_webrtc_size(payload)
         fps = _clamp_int(payload.get("fps"), MIN_STREAM_FPS, MAX_STREAM_FPS, DEFAULT_STREAM_FPS)
+        LOGGER.info(
+            "WebRTC offer received resolution=%s size=%sx%s fps=%s sdp_bytes=%s",
+            resolution,
+            width,
+            height,
+            fps,
+            len(sdp),
+        )
         self._start_capture(width, height, fps)
         try:
             loop = self._ensure_loop()
@@ -94,6 +108,7 @@ class BrowserWebRtcService(QObject):
     def stop_async(self, payload: dict[str, Any] | None = None) -> Future[dict[str, Any]]:
         payload = payload or {}
         peer_id = str(payload.get("peer_id") or "")
+        LOGGER.info("WebRTC stop requested peer_id=%s", peer_id or "all")
         loop = self._ensure_loop()
 
         async def stop_and_report() -> dict[str, Any]:
@@ -115,6 +130,9 @@ class BrowserWebRtcService(QObject):
             "min_fps": MIN_STREAM_FPS,
             "max_fps": MAX_STREAM_FPS,
         }
+
+    def has_peers(self) -> bool:
+        return self._peer_count() > 0
 
     def frame_snapshot(self) -> tuple[int, int, int, bytes] | None:
         with self.frame_lock:
@@ -144,21 +162,26 @@ class BrowserWebRtcService(QObject):
         asyncio.set_event_loop(loop)
         self.loop = loop
         self.loop_ready.set()
+        LOGGER.info("WebRTC event loop started")
         loop.run_forever()
 
     def _start_capture(self, width: int, height: int, fps: int) -> None:
         self.capture_width = width
         self.capture_height = height
         self.capture_fps = fps
-        self.capture_timer.setInterval(max(1, round(1000 / fps)))
-        if not self.capture_timer.isActive():
-            self.capture_timer.start()
+        self._reset_stats()
+        LOGGER.info("WebRTC capture start size=%sx%s fps=%s", width, height, fps)
         self._capture_frame()
 
     def _capture_frame(self) -> None:
+        self._capture_frame_data()
+
+    def _capture_frame_data(self) -> tuple[int, int, int, bytes] | None:
+        capture_started_at = time.perf_counter()
         pixmap = self.view.grab()
         if pixmap.isNull():
-            return
+            self._record_capture(empty=True, capture_ms=0.0, width=0, height=0)
+            return None
 
         scaled = pixmap.scaled(
             QSize(self.capture_width, self.capture_height),
@@ -166,15 +189,35 @@ class BrowserWebRtcService(QObject):
             Qt.TransformationMode.FastTransformation,
         )
         if scaled.isNull():
-            return
+            self._record_capture(empty=True, capture_ms=0.0, width=0, height=0)
+            return None
 
         image = scaled.toImage().convertToFormat(QImage.Format.Format_RGB888)
         width = max(1, image.width())
         height = max(1, image.height())
         stride = max(width * 3, image.bytesPerLine())
         data = bytes(image.constBits())
+        frame_data = (width, height, stride, data)
         with self.frame_lock:
-            self.latest_frame = (width, height, stride, data)
+            self.latest_frame = frame_data
+        capture_ms = (time.perf_counter() - capture_started_at) * 1000.0
+        self._record_capture(empty=False, capture_ms=capture_ms, width=width, height=height)
+        return frame_data
+
+    async def capture_frame_async(self, timeout: float = 0.2) -> tuple[int, int, int, bytes] | None:
+        # aiortc 的 RTP 发送线程拉帧时，同步请求 Qt 线程抓一张最新画面。 / When aiortc pulls a frame, ask Qt for a fresh capture.
+        request = _CaptureRequest()
+        self.capture_requested.emit(request)
+        await asyncio.to_thread(request.ready.wait, timeout)
+        return request.frame_data
+
+    @Slot(object)
+    def _capture_requested(self, request: object) -> None:
+        if not isinstance(request, _CaptureRequest):
+            return
+
+        request.frame_data = self._capture_frame_data()
+        request.ready.set()
 
     async def _create_answer(
         self,
@@ -191,10 +234,12 @@ class BrowserWebRtcService(QObject):
         with self.peer_lock:
             self.peer_connections[peer_id] = pc
         track = BrowserVideoTrack(self, fps)
+        LOGGER.info("WebRTC peer create peer_id=%s resolution=%s size=%sx%s fps=%s", peer_id, resolution, width, height, fps)
 
         try:
             @pc.on("connectionstatechange")
             async def on_connectionstatechange() -> None:
+                LOGGER.info("WebRTC peer state peer_id=%s state=%s", peer_id, pc.connectionState)
                 if pc.connectionState in {"failed", "closed", "disconnected"}:
                     await self._close_peer(peer_id)
 
@@ -204,6 +249,13 @@ class BrowserWebRtcService(QObject):
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
             await _wait_for_ice_gathering(pc)
+            LOGGER.info(
+                "WebRTC answer ready peer_id=%s ice=%s type=%s sdp_bytes=%s",
+                peer_id,
+                pc.iceGatheringState,
+                pc.localDescription.type,
+                len(pc.localDescription.sdp),
+            )
 
             return {
                 "transport": "webrtc",
@@ -235,6 +287,7 @@ class BrowserWebRtcService(QObject):
         with self.peer_lock:
             pc = self.peer_connections.pop(peer_id, None)
         if pc:
+            LOGGER.info("WebRTC peer close peer_id=%s", peer_id)
             await pc.close()
         self._request_capture_stop_if_idle()
 
@@ -249,7 +302,82 @@ class BrowserWebRtcService(QObject):
     @Slot()
     def _stop_capture_if_idle(self) -> None:
         if self._peer_count() == 0:
-            self.capture_timer.stop()
+            self._log_stats("capture_stop", force=True)
+            LOGGER.info("WebRTC capture stop: no active peers")
+
+    def _reset_stats(self) -> None:
+        now = time.monotonic()
+        with self.stats_lock:
+            self.stats_since = now
+            self.next_stats_log_at = now + WEBRTC_LOG_INTERVAL_SECONDS
+            self.captures = 0
+            self.empty_captures = 0
+            self.track_frames = 0
+            self.empty_track_frames = 0
+            self.capture_ms_total = 0.0
+            self.capture_ms_max = 0.0
+            self.last_capture_size = "none"
+
+    def _record_capture(self, *, empty: bool, capture_ms: float, width: int, height: int) -> None:
+        with self.stats_lock:
+            if empty:
+                self.empty_captures += 1
+            else:
+                self.captures += 1
+                self.capture_ms_total += capture_ms
+                self.capture_ms_max = max(self.capture_ms_max, capture_ms)
+                self.last_capture_size = f"{width}x{height}"
+        self._log_stats("interval")
+
+    def record_track_frame(self, *, empty: bool) -> None:
+        with self.stats_lock:
+            self.track_frames += 1
+            if empty:
+                self.empty_track_frames += 1
+        self._log_stats("interval")
+
+    def _log_stats(self, reason: str, force: bool = False) -> None:
+        now = time.monotonic()
+        with self.stats_lock:
+            if not force and now < self.next_stats_log_at:
+                return
+
+            elapsed = max(0.001, now - self.stats_since)
+            captures = self.captures
+            empty_captures = self.empty_captures
+            track_frames = self.track_frames
+            empty_track_frames = self.empty_track_frames
+            capture_avg = self.capture_ms_total / captures if captures else 0.0
+            capture_max = self.capture_ms_max
+            last_capture_size = self.last_capture_size
+            peers = self._peer_count()
+
+            self.stats_since = now
+            self.next_stats_log_at = now + WEBRTC_LOG_INTERVAL_SECONDS
+            self.captures = 0
+            self.empty_captures = 0
+            self.track_frames = 0
+            self.empty_track_frames = 0
+            self.capture_ms_total = 0.0
+            self.capture_ms_max = 0.0
+
+        LOGGER.info(
+            "WebRTC stats reason=%s elapsed=%.1fs peers=%s captures=%s capture_fps=%.1f "
+            "empty_captures=%s track_frames=%s track_fps=%.1f empty_track_frames=%s "
+            "capture_ms=%.1f/%.1f last_capture=%s",
+            reason,
+            elapsed,
+            peers,
+            captures,
+            captures / elapsed,
+            empty_captures,
+            track_frames,
+            track_frames / elapsed,
+            empty_track_frames,
+            capture_avg,
+            capture_max,
+            last_capture_size,
+        )
 
 
 class BrowserVideoTrack(VideoStreamTrack):  # type: ignore[misc]
@@ -259,17 +387,22 @@ class BrowserVideoTrack(VideoStreamTrack):  # type: ignore[misc]
         super().__init__()
         self.service = service
         self.fps = max(MIN_STREAM_FPS, min(MAX_STREAM_FPS, fps))
-        self.pts = 0
-        self.time_base = Fraction(1, 90000)
 
     async def recv(self) -> Any:
-        await asyncio.sleep(1 / self.fps)
-        self.pts += round(90000 / self.fps)
-        frame_data = self.service.frame_snapshot()
+        # 用 aiortc 的时间戳节奏驱动编码，同时每帧主动抓新画面。 / Let aiortc pace timestamps and actively capture each frame.
+        pts, time_base = await self.next_timestamp()
+        frame_data = await self.service.capture_frame_async(timeout=max(0.1, 2 / self.fps))
         if frame_data is None:
-            width, height, stride, data = 2, 2, 6, bytes(12)
+            frame_data = self.service.frame_snapshot()
+            if frame_data is None:
+                width, height, stride, data = 2, 2, 6, bytes(12)
+                self.service.record_track_frame(empty=True)
+            else:
+                width, height, stride, data = frame_data
+                self.service.record_track_frame(empty=False)
         else:
             width, height, stride, data = frame_data
+            self.service.record_track_frame(empty=False)
 
         frame = av.VideoFrame(width, height, "rgb24")  # type: ignore[union-attr]
         plane = frame.planes[0]
@@ -283,9 +416,16 @@ class BrowserVideoTrack(VideoStreamTrack):  # type: ignore[misc]
                 dst_start = row * plane.line_size
                 output[dst_start : dst_start + row_bytes] = data[src_start : src_start + row_bytes]
             plane.update(output)
-        frame.pts = self.pts
-        frame.time_base = self.time_base
+        frame.pts = pts
+        frame.time_base = time_base
         return frame
+
+
+class _CaptureRequest:
+    # Qt signal 传递的小对象，用 Event 把抓图结果交回 aiortc 线程。 / Signal payload that returns capture data to the aiortc thread.
+    def __init__(self) -> None:
+        self.ready = threading.Event()
+        self.frame_data: tuple[int, int, int, bytes] | None = None
 
 
 def _prefer_h264(pc: Any, sender: Any) -> None:

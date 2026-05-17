@@ -11,12 +11,19 @@ namespace RemoteExplorer
 {
     public class RemoteExplorerWebRtcPlayback : MonoBehaviour
     {
+        private const float WebRtcStatsIntervalSeconds = 5f;
+
         private RemoteExplorerClient client;
         private RawImage targetImage;
         private Action<string> statusSink;
         private RTCPeerConnection peerConnection;
         private string peerId;
         private Coroutine updateCoroutine;
+        private float statsSince = -1f;
+        private float nextStatsLogAt = -1f;
+        private int receivedFrames;
+        private int lastTextureWidth;
+        private int lastTextureHeight;
 
         public bool IsActive => peerConnection != null && !string.IsNullOrEmpty(peerId);
         public Action<int, int> OnFrameSize;
@@ -61,13 +68,16 @@ namespace RemoteExplorer
                 yield break;
             }
 
+            RemoteExplorerDiagnostics.Info($"WebRTC client start resolution={resolution} fps={fps}");
             yield return StopRoutine(cancellationToken, null);
+            ResetStats();
             EnsureInitialized();
 
             peerConnection = new RTCPeerConnection();
             peerConnection.OnTrack = OnTrack;
             peerConnection.OnConnectionStateChange = state =>
             {
+                RemoteExplorerDiagnostics.Info("WebRTC connection state=" + state);
                 if (state == RTCPeerConnectionState.Failed ||
                     state == RTCPeerConnectionState.Closed ||
                     state == RTCPeerConnectionState.Disconnected)
@@ -83,15 +93,18 @@ namespace RemoteExplorer
             yield return offerOperation;
             if (offerOperation.IsError)
             {
+                Debug.LogWarning("[RemoteExplorer] WebRTC CreateOffer failed: " + offerOperation.Error.message);
                 completion.TrySetException(new InvalidOperationException(offerOperation.Error.message));
                 yield break;
             }
 
             var offer = offerOperation.Desc;
+            RemoteExplorerDiagnostics.Info("WebRTC local offer created sdp_bytes=" + (offer.sdp != null ? offer.sdp.Length : 0));
             var localOperation = peerConnection.SetLocalDescription(ref offer);
             yield return localOperation;
             if (localOperation.IsError)
             {
+                Debug.LogWarning("[RemoteExplorer] WebRTC SetLocalDescription failed: " + localOperation.Error.message);
                 completion.TrySetException(new InvalidOperationException(localOperation.Error.message));
                 yield break;
             }
@@ -120,6 +133,7 @@ namespace RemoteExplorer
 
             if (offerTask.IsFaulted)
             {
+                Debug.LogWarning("[RemoteExplorer] WebRTC offer command failed: " + UnwrapTaskException(offerTask.Exception).Message);
                 completion.TrySetException(UnwrapTaskException(offerTask.Exception));
                 yield break;
             }
@@ -127,6 +141,8 @@ namespace RemoteExplorer
             var result = offerTask.Result;
             if (!result.ok && result.type != "result")
             {
+                var error = result.error != null ? $"{result.error.code}: {result.error.message}" : "Unknown error";
+                Debug.LogWarning("[RemoteExplorer] WebRTC offer rejected: " + error);
                 completion.TrySetResult(result);
                 yield break;
             }
@@ -134,11 +150,14 @@ namespace RemoteExplorer
             var answer = result.result;
             if (answer == null || string.IsNullOrEmpty(answer.sdp))
             {
+                Debug.LogWarning("[RemoteExplorer] WebRTC answer missing SDP.");
                 completion.TrySetException(new InvalidOperationException("Server did not return a WebRTC answer."));
                 yield break;
             }
 
             peerId = answer.peer_id ?? string.Empty;
+            RemoteExplorerDiagnostics.Info(
+                $"WebRTC answer received peer_id={peerId} type={answer.type} codec={answer.codec} size={answer.width}x{answer.height} fps={answer.fps} sdp_bytes={answer.sdp.Length}");
             OnFrameSize?.Invoke(Mathf.Max(1, answer.width), Mathf.Max(1, answer.height));
 
             var answerDescription = new RTCSessionDescription
@@ -150,10 +169,12 @@ namespace RemoteExplorer
             yield return remoteOperation;
             if (remoteOperation.IsError)
             {
+                Debug.LogWarning("[RemoteExplorer] WebRTC SetRemoteDescription failed: " + remoteOperation.Error.message);
                 completion.TrySetException(new InvalidOperationException(remoteOperation.Error.message));
                 yield break;
             }
 
+            RemoteExplorerDiagnostics.Info("WebRTC remote description applied.");
             completion.TrySetResult(result);
         }
 
@@ -163,6 +184,11 @@ namespace RemoteExplorer
         {
             var stoppedPeerId = peerId;
             peerId = null;
+            if (!string.IsNullOrEmpty(stoppedPeerId))
+            {
+                RemoteExplorerDiagnostics.Info("WebRTC client stop peer_id=" + stoppedPeerId);
+                LogStats("stop", true);
+            }
 
             if (peerConnection != null)
             {
@@ -178,6 +204,7 @@ namespace RemoteExplorer
                 {
                     if (cancellationToken.IsCancellationRequested)
                     {
+                        Debug.LogWarning("[RemoteExplorer] WebRTC stop cancelled peer_id=" + stoppedPeerId);
                         completion?.TrySetCanceled();
                         yield break;
                     }
@@ -197,6 +224,7 @@ namespace RemoteExplorer
             }
 
             updateCoroutine = StartCoroutine(WebRTC.Update());
+            RemoteExplorerDiagnostics.Info("WebRTC update coroutine started.");
         }
 
         private static Exception UnwrapTaskException(Exception exception)
@@ -218,9 +246,13 @@ namespace RemoteExplorer
             var videoTrack = trackEvent.Track as VideoStreamTrack;
             if (videoTrack == null)
             {
+                Debug.LogWarning("[RemoteExplorer] WebRTC track event did not contain a video track.");
                 return;
             }
 
+            RemoteExplorerDiagnostics.Info("WebRTC video track received.");
+            // 这个回调只保证接收 texture 已创建，不代表每帧到达。
+            // This callback means the receive texture exists; it is not a per-frame callback.
             videoTrack.OnVideoReceived += texture =>
             {
                 if (targetImage == null || texture == null)
@@ -230,13 +262,60 @@ namespace RemoteExplorer
 
                 targetImage.texture = texture;
                 targetImage.color = Color.white;
+                RecordFrame(texture.width, texture.height);
                 OnFrameSize?.Invoke(Mathf.Max(1, texture.width), Mathf.Max(1, texture.height));
                 OnFrameReceived?.Invoke();
             };
         }
 
+        private void ResetStats()
+        {
+            statsSince = Time.unscaledTime;
+            nextStatsLogAt = Time.unscaledTime + WebRtcStatsIntervalSeconds;
+            receivedFrames = 0;
+            lastTextureWidth = 0;
+            lastTextureHeight = 0;
+        }
+
+        private void RecordFrame(int width, int height)
+        {
+            if (statsSince < 0f)
+            {
+                ResetStats();
+            }
+
+            receivedFrames++;
+            lastTextureWidth = Mathf.Max(1, width);
+            lastTextureHeight = Mathf.Max(1, height);
+            LogStats("interval");
+        }
+
+        private void LogStats(string reason, bool force = false)
+        {
+            if (statsSince < 0f)
+            {
+                return;
+            }
+
+            if (!force && Time.unscaledTime < nextStatsLogAt)
+            {
+                return;
+            }
+
+            var elapsed = Mathf.Max(0.001f, Time.unscaledTime - statsSince);
+            RemoteExplorerDiagnostics.Info(
+                "WebRTC render stats " +
+                $"reason={reason} elapsed={elapsed:0.0}s texture_callbacks={receivedFrames} callback_rate={(receivedFrames / elapsed):0.0} " +
+                $"last_texture={lastTextureWidth}x{lastTextureHeight} peer_id={(string.IsNullOrEmpty(peerId) ? "none" : peerId)}");
+
+            statsSince = Time.unscaledTime;
+            nextStatsLogAt = Time.unscaledTime + WebRtcStatsIntervalSeconds;
+            receivedFrames = 0;
+        }
+
         private void OnDestroy()
         {
+            LogStats("destroy", true);
             if (peerConnection != null)
             {
                 peerConnection.Close();

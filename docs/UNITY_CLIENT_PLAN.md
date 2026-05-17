@@ -67,10 +67,14 @@ Client side:
   - 30fps default
   - 20-60fps range
   - hot-applies through `stream_config` while the UDP stream is running
+- Stream mode selector:
+  - WebRTC/H.264 when the Unity WebRTC package is available
+  - UDP/JPEG as the compatibility mode
+  - mode changes stop the previous transport before starting the selected one
 - Unity WebRTC/H.264 playback is implemented behind the
   `REMOTE_EXPLORER_HAS_WEBRTC` package version define. It is enabled when
-  `com.unity.webrtc@3.0.0-pre.8` resolves. In the WebRTC branch, negotiation
-  failure is reported directly instead of falling back to UDP/JPEG.
+  `com.unity.webrtc@3.0.0-pre.8` resolves. Negotiation failure is reported
+  directly; users can switch the stream mode to UDP/JPEG from the client.
 
 Known MVP limits:
 

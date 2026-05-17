@@ -234,6 +234,8 @@ Payload may be omitted or `{}`.
 
 Starts a UDP JPEG frame stream to the requesting client. The server uses the
 source IP of the control packet and the UDP `port` supplied by the client.
+Starting or configuring the UDP stream closes any active WebRTC peers on the
+server.
 
 ```json
 {
@@ -285,7 +287,8 @@ starts one.
 ### `webrtc_offer`
 
 Negotiates a WebRTC/H.264 stream over the existing authenticated UDP control
-channel. The Unity client creates a recv-only WebRTC offer and sends:
+channel. Accepting a WebRTC offer stops any active UDP JPEG stream on the
+server. The Unity client creates a recv-only WebRTC offer and sends:
 
 ```json
 {

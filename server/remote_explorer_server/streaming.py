@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import math
+import logging
 import socket
 import struct
+import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -16,12 +19,18 @@ STREAM_MAGIC = b"REXPSTR1"
 STREAM_HEADER_FORMAT = "!8sIHHHHHH"
 STREAM_HEADER_SIZE = struct.calcsize(STREAM_HEADER_FORMAT)
 STREAM_CHUNK_BYTES = 1000
+# 大帧分片发送削峰，避免 UDP 突发压垮客户端缓冲。 / Pace large frame chunks to avoid UDP bursts.
+STREAM_CHUNK_PACE_BATCH = 16
+STREAM_CHUNK_PACE_SECONDS = 0.001
 DEFAULT_STREAM_FPS = 30
 MIN_STREAM_FPS = 20
 MAX_STREAM_FPS = 60
 DEFAULT_JPEG_QUALITY = 55
 MAX_STREAM_HEIGHT = 1080
 MAX_STREAM_WIDTH = 1920
+STREAM_LOG_INTERVAL_SECONDS = 5.0
+
+LOGGER = logging.getLogger("remote_explorer.streaming")
 
 RESOLUTIONS: dict[str, tuple[int, int]] = {
     "360p": (640, 360),
@@ -56,6 +65,8 @@ class BrowserStreamService(QObject):
         self.pending_frame: Future[None] | None = None
         self.encoder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="RemoteExplorerJpegStream")
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.stats_lock = threading.Lock()
+        self._reset_stats()
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         host = _clean_host(str(payload.get("_source_host") or payload.get("host") or ""))
@@ -81,11 +92,25 @@ class BrowserStreamService(QObject):
         self.target_host = QHostAddress(host)
         self.target_address = host
         self.timer.setInterval(max(1, round(1000 / fps)))
+        self._reset_stats()
+        LOGGER.info(
+            "UDP/JPEG stream start target=%s:%s resolution=%s size=%sx%s fps=%s quality=%s",
+            host,
+            port,
+            resolution,
+            width,
+            height,
+            fps,
+            quality,
+        )
         self.timer.start()
         self._send_frame()
         return self.status()
 
     def stop(self) -> dict[str, Any]:
+        if self.config or self.timer.isActive():
+            self._log_stats("stop", force=True)
+            LOGGER.info("UDP/JPEG stream stop")
         self.timer.stop()
         self.config = None
         self.target_host = None
@@ -141,13 +166,17 @@ class BrowserStreamService(QObject):
     def _send_frame(self) -> None:
         self._clear_completed_frame()
         if self.pending_frame is not None:
+            # 编码线程还在处理上一帧时丢弃本 tick，保持低延迟。 / Drop this tick while the encoder is busy to keep latency low.
+            self._record_skip("encoder_busy")
             return
 
         if not self.config or not self.target_host or not self.target_address:
             return
 
+        capture_started_at = time.perf_counter()
         pixmap = self.view.grab()
         if pixmap.isNull():
+            self._record_skip("null_grab")
             return
 
         source_width = max(1, self.view.width())
@@ -158,8 +187,10 @@ class BrowserStreamService(QObject):
             Qt.TransformationMode.FastTransformation,
         )
         if scaled.isNull():
+            self._record_skip("null_scaled")
             return
 
+        capture_ms = (time.perf_counter() - capture_started_at) * 1000.0
         self.frame_id = (self.frame_id + 1) & 0xFFFFFFFF
         image = scaled.toImage().copy()
         config = self.config
@@ -167,6 +198,8 @@ class BrowserStreamService(QObject):
         frame_width = max(1, scaled.width())
         frame_height = max(1, scaled.height())
         frame_id = self.frame_id
+        self._record_frame_queued(capture_ms)
+        # JPEG 编码和 UDP 发送放到单线程池，避免阻塞 Qt UI 线程。 / Encode/send on one worker so the Qt UI thread stays responsive.
         self.pending_frame = self.encoder.submit(
             self._encode_and_send_frame,
             image,
@@ -185,8 +218,8 @@ class BrowserStreamService(QObject):
 
         try:
             self.pending_frame.result()
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.warning("UDP/JPEG frame worker failed: %s", exc)
         finally:
             self.pending_frame = None
 
@@ -201,14 +234,20 @@ class BrowserStreamService(QObject):
         frame_height: int,
         frame_id: int,
     ) -> None:
+        encode_started_at = time.perf_counter()
         jpeg = _encode_jpeg(image, config.quality)
+        encode_ms = (time.perf_counter() - encode_started_at) * 1000.0
         if not jpeg:
+            self._record_skip("encode_failed")
             return
 
         chunk_count = int(math.ceil(len(jpeg) / STREAM_CHUNK_BYTES))
         if chunk_count <= 0 or chunk_count > 65535:
+            self._record_skip("invalid_chunk_count")
             return
 
+        send_started_at = time.perf_counter()
+        bytes_sent = 0
         for chunk_index in range(chunk_count):
             start = chunk_index * STREAM_CHUNK_BYTES
             chunk = jpeg[start : start + STREAM_CHUNK_BYTES]
@@ -223,7 +262,161 @@ class BrowserStreamService(QObject):
                 source_width,
                 source_height,
             )
-            self.socket.sendto(header + chunk, (target_address, config.port))
+            packet = header + chunk
+            self.socket.sendto(packet, (target_address, config.port))
+            bytes_sent += len(packet)
+            if chunk_index and chunk_index % STREAM_CHUNK_PACE_BATCH == 0:
+                # 微小间隔让系统/网络栈有机会排空发送队列。 / A tiny pause lets the OS/network stack drain the burst.
+                time.sleep(STREAM_CHUNK_PACE_SECONDS)
+        send_ms = (time.perf_counter() - send_started_at) * 1000.0
+        self._record_frame_sent(
+            frame_id=frame_id,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            jpeg_bytes=len(jpeg),
+            packet_bytes=bytes_sent,
+            chunks=chunk_count,
+            encode_ms=encode_ms,
+            send_ms=send_ms,
+        )
+
+    def _reset_stats(self) -> None:
+        now = time.monotonic()
+        with self.stats_lock:
+            self.stats_since = now
+            self.next_stats_log_at = now + STREAM_LOG_INTERVAL_SECONDS
+            self.frames_queued = 0
+            self.frames_sent = 0
+            self.bytes_sent = 0
+            self.chunks_sent = 0
+            self.capture_ms_total = 0.0
+            self.capture_ms_max = 0.0
+            self.encode_ms_total = 0.0
+            self.encode_ms_max = 0.0
+            self.send_ms_total = 0.0
+            self.send_ms_max = 0.0
+            self.skipped_busy = 0
+            self.skipped_null_grab = 0
+            self.skipped_null_scaled = 0
+            self.skipped_encode_failed = 0
+            self.skipped_invalid_chunk_count = 0
+            self.last_frame_id = 0
+            self.last_frame_size = ""
+
+    def _record_frame_queued(self, capture_ms: float) -> None:
+        with self.stats_lock:
+            self.frames_queued += 1
+            self.capture_ms_total += capture_ms
+            self.capture_ms_max = max(self.capture_ms_max, capture_ms)
+        self._log_stats("interval")
+
+    def _record_frame_sent(
+        self,
+        *,
+        frame_id: int,
+        frame_width: int,
+        frame_height: int,
+        jpeg_bytes: int,
+        packet_bytes: int,
+        chunks: int,
+        encode_ms: float,
+        send_ms: float,
+    ) -> None:
+        with self.stats_lock:
+            self.frames_sent += 1
+            self.bytes_sent += packet_bytes
+            self.chunks_sent += chunks
+            self.encode_ms_total += encode_ms
+            self.encode_ms_max = max(self.encode_ms_max, encode_ms)
+            self.send_ms_total += send_ms
+            self.send_ms_max = max(self.send_ms_max, send_ms)
+            self.last_frame_id = frame_id
+            self.last_frame_size = f"{frame_width}x{frame_height}/{jpeg_bytes}B/{chunks} chunks"
+        self._log_stats("interval")
+
+    def _record_skip(self, reason: str) -> None:
+        with self.stats_lock:
+            if reason == "encoder_busy":
+                self.skipped_busy += 1
+            elif reason == "null_grab":
+                self.skipped_null_grab += 1
+            elif reason == "null_scaled":
+                self.skipped_null_scaled += 1
+            elif reason == "encode_failed":
+                self.skipped_encode_failed += 1
+            elif reason == "invalid_chunk_count":
+                self.skipped_invalid_chunk_count += 1
+        self._log_stats("interval")
+
+    def _log_stats(self, reason: str, force: bool = False) -> None:
+        now = time.monotonic()
+        with self.stats_lock:
+            if not force and now < self.next_stats_log_at:
+                return
+
+            elapsed = max(0.001, now - self.stats_since)
+            queued = self.frames_queued
+            sent = self.frames_sent
+            chunks = self.chunks_sent
+            bytes_sent = self.bytes_sent
+            capture_avg = self.capture_ms_total / queued if queued else 0.0
+            encode_avg = self.encode_ms_total / sent if sent else 0.0
+            send_avg = self.send_ms_total / sent if sent else 0.0
+            capture_max = self.capture_ms_max
+            encode_max = self.encode_ms_max
+            send_max = self.send_ms_max
+            skipped_busy = self.skipped_busy
+            skipped_null_grab = self.skipped_null_grab
+            skipped_null_scaled = self.skipped_null_scaled
+            skipped_encode_failed = self.skipped_encode_failed
+            skipped_invalid_chunk_count = self.skipped_invalid_chunk_count
+            last_frame_id = self.last_frame_id
+            last_frame_size = self.last_frame_size or "none"
+
+            self.stats_since = now
+            self.next_stats_log_at = now + STREAM_LOG_INTERVAL_SECONDS
+            self.frames_queued = 0
+            self.frames_sent = 0
+            self.bytes_sent = 0
+            self.chunks_sent = 0
+            self.capture_ms_total = 0.0
+            self.capture_ms_max = 0.0
+            self.encode_ms_total = 0.0
+            self.encode_ms_max = 0.0
+            self.send_ms_total = 0.0
+            self.send_ms_max = 0.0
+            self.skipped_busy = 0
+            self.skipped_null_grab = 0
+            self.skipped_null_scaled = 0
+            self.skipped_encode_failed = 0
+            self.skipped_invalid_chunk_count = 0
+
+        LOGGER.info(
+            "UDP/JPEG stats reason=%s elapsed=%.1fs queued=%s sent=%s fps=%.1f bytes=%s chunks=%s "
+            "capture_ms=%.1f/%.1f encode_ms=%.1f/%.1f send_ms=%.1f/%.1f "
+            "skip_busy=%s skip_null_grab=%s skip_null_scaled=%s skip_encode_failed=%s "
+            "skip_bad_chunks=%s last_frame=%s %s",
+            reason,
+            elapsed,
+            queued,
+            sent,
+            sent / elapsed,
+            bytes_sent,
+            chunks,
+            capture_avg,
+            capture_max,
+            encode_avg,
+            encode_max,
+            send_avg,
+            send_max,
+            skipped_busy,
+            skipped_null_grab,
+            skipped_null_scaled,
+            skipped_encode_failed,
+            skipped_invalid_chunk_count,
+            last_frame_id,
+            last_frame_size,
+        )
 
 
 def _encode_jpeg(image: QImage, quality: int) -> bytes:

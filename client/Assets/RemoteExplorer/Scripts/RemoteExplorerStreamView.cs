@@ -52,7 +52,7 @@ namespace RemoteExplorer
                 return;
             }
 
-            Debug.Log($"[RemoteExplorer] Preview pointer normalized=({normalized.x:F3},{normalized.y:F3})");
+            RemoteExplorerDiagnostics.Info($"Preview pointer normalized=({normalized.x:F3},{normalized.y:F3})");
             OnTap?.Invoke(normalized);
         }
     }

@@ -57,6 +57,13 @@ Implemented client features:
   the `webrtc` extra and the Unity WebRTC package resolves in the client
   project. In the WebRTC branch, negotiation failure is reported directly and
   does not fall back to UDP/JPEG.
+- When WebRTC is available, the client can choose `WebRTC/H.264` or `UDP/JPEG`.
+  Switching modes while a stream is running stops the old transport and starts
+  the newly selected one.
+- Stream diagnostics are logged every 5 seconds while active. Server logs go to
+  the server console through an asynchronous logger. Unity client diagnostics
+  are written to `remote-explorer-stream.log` under `Application.persistentDataPath`;
+  the Unity Console prints that path once at startup.
 - Tap preview to click the remote webpage.
 
 The client UI is created at runtime by `RemoteExplorerBootstrap`, so an empty

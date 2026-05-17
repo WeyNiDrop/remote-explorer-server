@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import logging
+import logging.handlers
 import os
+import queue
 import sys
 from pathlib import Path
 
@@ -13,6 +17,22 @@ from .config import (
     default_server_name,
     load_or_create_server_id,
 )
+
+
+def configure_logging() -> logging.handlers.QueueListener:
+    # 使用队列日志避免串流线程被控制台 I/O 卡住。 / Queue logging keeps stream threads off console I/O.
+    log_queue: queue.Queue[logging.LogRecord] = queue.Queue()
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    listener = logging.handlers.QueueListener(log_queue, console)
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+    root.addHandler(logging.handlers.QueueHandler(log_queue))
+    listener.start()
+    atexit.register(listener.stop)
+    return listener
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    log_listener = configure_logging()
     config = ServerConfig(
         name=args.name,
         discovery_port=args.discovery_port,
@@ -75,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     # Keep service objects alive for the lifetime of the Qt app.
     window.discovery_service = discovery
     window.control_service = control
+    window.log_listener = log_listener
 
     return app.exec()
 
