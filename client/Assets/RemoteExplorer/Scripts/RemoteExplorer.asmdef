@@ -2,7 +2,8 @@
   "name": "RemoteExplorer",
   "rootNamespace": "RemoteExplorer",
   "references": [
-    "UnityEngine.UI"
+    "UnityEngine.UI",
+    "GUID:f12aafacab75a87499e7e45c873ffab8"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],

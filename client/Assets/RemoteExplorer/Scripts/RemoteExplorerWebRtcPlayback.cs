@@ -16,7 +16,6 @@ namespace RemoteExplorer
         private Action<string> statusSink;
         private RTCPeerConnection peerConnection;
         private string peerId;
-        private bool initialized;
         private Coroutine updateCoroutine;
 
         public bool IsActive => peerConnection != null && !string.IsNullOrEmpty(peerId);
@@ -192,14 +191,12 @@ namespace RemoteExplorer
 
         private void EnsureInitialized()
         {
-            if (initialized)
+            if (updateCoroutine != null)
             {
                 return;
             }
 
-            WebRTC.Initialize();
             updateCoroutine = StartCoroutine(WebRTC.Update());
-            initialized = true;
         }
 
         private void OnTrack(RTCTrackEvent trackEvent)
@@ -239,11 +236,6 @@ namespace RemoteExplorer
                 updateCoroutine = null;
             }
 
-            if (initialized)
-            {
-                WebRTC.Dispose();
-                initialized = false;
-            }
         }
     }
 }
