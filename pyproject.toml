@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remote-explorer"
+version = "0.1.0"
+description = "LAN remote control server for an embedded browser."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Remote Explorer Contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+server = [
+  "PySide6>=6.7",
+  "PySide6-Addons>=6.7",
+]
+webrtc = [
+  "aiortc>=1.9",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+remote-explorer-server = "remote_explorer_server.main:main"
+
+[tool.setuptools.packages.find]
+where = ["server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["server"]
