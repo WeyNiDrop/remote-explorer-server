@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from concurrent.futures import Future
 from typing import Any
 
 from PySide6.QtCore import QUrl
@@ -361,10 +362,10 @@ class BrowserController:
         respond(_ok(self.stream_service.status()))
 
     def _webrtc_offer(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
-        respond(_ok(self.webrtc_service.offer(payload)))
+        self._respond_future(self.webrtc_service.offer_async(payload), respond)
 
     def _webrtc_stop(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
-        respond(_ok(self.webrtc_service.stop(payload)))
+        self._respond_future(self.webrtc_service.stop_async(payload), respond)
 
     def _webrtc_status(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
         respond(_ok(self.webrtc_service.status()))
@@ -378,6 +379,20 @@ class BrowserController:
 
     def _run_js(self, script: str, respond: BrowserResponder) -> None:
         self.view.page().runJavaScript(script, lambda value: respond(_ok({"js": value})))
+
+    @staticmethod
+    def _respond_future(future: Future[dict[str, Any]], respond: BrowserResponder) -> None:
+        def done(completed: Future[dict[str, Any]]) -> None:
+            if completed.cancelled():
+                respond(_error("command_cancelled", "Command was cancelled"))
+                return
+
+            try:
+                respond(_ok(completed.result()))
+            except Exception as exc:
+                respond(_error("command_failed", str(exc)))
+
+        future.add_done_callback(done)
 
 
 def _ok(result: dict[str, Any]) -> dict[str, Any]:

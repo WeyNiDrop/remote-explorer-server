@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtNetwork import QHostAddress, QUdpSocket
 
 from .config import ServerConfig
@@ -14,6 +14,8 @@ BrowserResponder = Callable[[dict[str, Any]], None]
 
 
 class ControlService(QObject):
+    response_ready = Signal(object, int, object)
+
     def __init__(
         self,
         config: ServerConfig,
@@ -26,6 +28,7 @@ class ControlService(QObject):
         self.auth_manager = auth_manager
         self.command_handler = command_handler
         self.socket = QUdpSocket(self)
+        self.response_ready.connect(self._send)
         flags = QUdpSocket.ShareAddress | QUdpSocket.ReuseAddressHint
         if not self.socket.bind(QHostAddress.AnyIPv4, config.control_port, flags):
             raise RuntimeError(f"Could not bind UDP control port {config.control_port}")
@@ -83,7 +86,7 @@ class ControlService(QObject):
         def respond(result: dict[str, Any]) -> None:
             if result.get("ok") is False:
                 error = result.get("error") or {}
-                self._send(
+                self.response_ready.emit(
                     host,
                     port,
                     error_message(
@@ -93,9 +96,10 @@ class ControlService(QObject):
                     ),
                 )
                 return
-            self._send(host, port, result_message(request_id, result.get("result") or result))
+            self.response_ready.emit(host, port, result_message(request_id, result.get("result") or result))
 
         self.command_handler(command, payload, respond)
 
+    @Slot(object, int, object)
     def _send(self, host: QHostAddress, port: int, message: dict[str, Any]) -> None:
         self.socket.writeDatagram(encode_message(message), host, port)

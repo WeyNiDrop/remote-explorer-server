@@ -142,7 +142,7 @@ class BrowserStreamService(QObject):
         scaled = pixmap.scaled(
             QSize(self.config.width, self.config.height),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            Qt.TransformationMode.FastTransformation,
         )
         if scaled.isNull():
             return
