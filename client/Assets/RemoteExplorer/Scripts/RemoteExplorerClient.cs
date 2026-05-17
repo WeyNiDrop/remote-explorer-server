@@ -399,12 +399,18 @@ namespace RemoteExplorer
         public async Task<CommandEnvelope> StopStreamAsync(CancellationToken cancellationToken = default)
         {
             CommandEnvelope result = null;
-            if (IsConnected)
+            try
             {
-                result = await SendCommandAsync("stream_stop", new Dictionary<string, object>(), cancellationToken);
+                if (IsConnected)
+                {
+                    result = await SendCommandAsync("stream_stop", new Dictionary<string, object>(), cancellationToken);
+                }
+            }
+            finally
+            {
+                StopLocalStream();
             }
 
-            StopLocalStream();
             return result ?? new CommandEnvelope { type = "result", ok = true };
         }
 

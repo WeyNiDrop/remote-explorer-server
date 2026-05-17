@@ -614,12 +614,26 @@ namespace RemoteExplorer
 #if REMOTE_EXPLORER_HAS_WEBRTC
                 if (webRtcPlayback != null && webRtcPlayback.IsActive)
                 {
-                    await webRtcPlayback.StopAsync(lifetime.Token);
+                    try
+                    {
+                        await webRtcPlayback.StopAsync(lifetime.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogWarning("[RemoteExplorer] WebRTC stop timed out during restart: " + ex.Message);
+                    }
                 }
 #endif
                 if (client.IsStreaming)
                 {
-                    await client.StopStreamAsync(lifetime.Token);
+                    try
+                    {
+                        await client.StopStreamAsync(lifetime.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogWarning("[RemoteExplorer] Image stream stop timed out during restart: " + ex.Message);
+                    }
                 }
                 if (!client.IsConnected)
                 {

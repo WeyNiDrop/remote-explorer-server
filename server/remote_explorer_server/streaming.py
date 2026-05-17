@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+import socket
 import struct
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QSize, Qt, QTimer
-from PySide6.QtNetwork import QHostAddress, QUdpSocket
+from PySide6.QtNetwork import QHostAddress
+from PySide6.QtGui import QImage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 STREAM_MAGIC = b"REXPSTR1"
@@ -43,12 +46,16 @@ class BrowserStreamService(QObject):
     def __init__(self, view: QWebEngineView, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.view = view
-        self.socket = QUdpSocket(self)
         self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._send_frame)
         self.config: StreamConfig | None = None
         self.target_host: QHostAddress | None = None
+        self.target_address: str | None = None
         self.frame_id = 0
+        self.pending_frame: Future[None] | None = None
+        self.encoder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="RemoteExplorerJpegStream")
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         host = _clean_host(str(payload.get("_source_host") or payload.get("host") or ""))
@@ -72,6 +79,7 @@ class BrowserStreamService(QObject):
             resolution=resolution,
         )
         self.target_host = QHostAddress(host)
+        self.target_address = host
         self.timer.setInterval(max(1, round(1000 / fps)))
         self.timer.start()
         self._send_frame()
@@ -81,6 +89,7 @@ class BrowserStreamService(QObject):
         self.timer.stop()
         self.config = None
         self.target_host = None
+        self.target_address = None
         return self.status()
 
     def configure(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -130,7 +139,11 @@ class BrowserStreamService(QObject):
         }
 
     def _send_frame(self) -> None:
-        if not self.config or not self.target_host:
+        self._clear_completed_frame()
+        if self.pending_frame is not None:
+            return
+
+        if not self.config or not self.target_host or not self.target_address:
             return
 
         pixmap = self.view.grab()
@@ -147,17 +160,54 @@ class BrowserStreamService(QObject):
         if scaled.isNull():
             return
 
-        jpeg = _encode_jpeg(scaled, self.config.quality)
+        self.frame_id = (self.frame_id + 1) & 0xFFFFFFFF
+        image = scaled.toImage().copy()
+        config = self.config
+        target_address = self.target_address
+        frame_width = max(1, scaled.width())
+        frame_height = max(1, scaled.height())
+        frame_id = self.frame_id
+        self.pending_frame = self.encoder.submit(
+            self._encode_and_send_frame,
+            image,
+            config,
+            target_address,
+            source_width,
+            source_height,
+            frame_width,
+            frame_height,
+            frame_id,
+        )
+
+    def _clear_completed_frame(self) -> None:
+        if self.pending_frame is None or not self.pending_frame.done():
+            return
+
+        try:
+            self.pending_frame.result()
+        except Exception:
+            pass
+        finally:
+            self.pending_frame = None
+
+    def _encode_and_send_frame(
+        self,
+        image: QImage,
+        config: StreamConfig,
+        target_address: str,
+        source_width: int,
+        source_height: int,
+        frame_width: int,
+        frame_height: int,
+        frame_id: int,
+    ) -> None:
+        jpeg = _encode_jpeg(image, config.quality)
         if not jpeg:
             return
 
-        self.frame_id = (self.frame_id + 1) & 0xFFFFFFFF
         chunk_count = int(math.ceil(len(jpeg) / STREAM_CHUNK_BYTES))
         if chunk_count <= 0 or chunk_count > 65535:
             return
-
-        frame_width = max(1, scaled.width())
-        frame_height = max(1, scaled.height())
 
         for chunk_index in range(chunk_count):
             start = chunk_index * STREAM_CHUNK_BYTES
@@ -165,7 +215,7 @@ class BrowserStreamService(QObject):
             header = struct.pack(
                 STREAM_HEADER_FORMAT,
                 STREAM_MAGIC,
-                self.frame_id,
+                frame_id,
                 chunk_index,
                 chunk_count,
                 frame_width,
@@ -173,15 +223,15 @@ class BrowserStreamService(QObject):
                 source_width,
                 source_height,
             )
-            self.socket.writeDatagram(header + chunk, self.target_host, self.config.port)
+            self.socket.sendto(header + chunk, (target_address, config.port))
 
 
-def _encode_jpeg(pixmap: Any, quality: int) -> bytes:
+def _encode_jpeg(image: QImage, quality: int) -> bytes:
     byte_array = QByteArray()
     buffer = QBuffer(byte_array)
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     try:
-        if not pixmap.toImage().save(buffer, "JPG", quality):
+        if not image.save(buffer, "JPG", quality):
             return b""
         return bytes(byte_array)
     finally:
