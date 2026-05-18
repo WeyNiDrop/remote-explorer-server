@@ -26,6 +26,15 @@ pip install -e ".[server,dev]"
 python -m remote_explorer_server --password 123456
 ```
 
+The server uses a Chromium-family browser engine by default when Chrome, Edge,
+or Chromium is installed. This improves compatibility with mainstream HTML5
+video sites. To force a backend or point to a browser executable:
+
+```powershell
+python -m remote_explorer_server --browser-engine chromium --browser-executable "C:\Program Files\Google\Chrome\Application\chrome.exe"
+python -m remote_explorer_server --browser-engine qt
+```
+
 For server-side WebRTC/H.264 support, install the optional WebRTC extra:
 
 ```powershell

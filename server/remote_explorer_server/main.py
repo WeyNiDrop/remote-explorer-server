@@ -44,6 +44,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-dir", type=Path, default=default_data_dir())
     parser.add_argument("--start-url", default="about:blank")
     parser.add_argument(
+        "--browser-engine",
+        choices=["auto", "chromium", "qt"],
+        default=os.environ.get("REMOTE_EXPLORER_BROWSER_ENGINE", "auto"),
+        help="Browser backend. auto prefers system Chromium/Chrome/Edge and falls back to Qt WebEngine.",
+    )
+    parser.add_argument(
+        "--browser-executable",
+        default=os.environ.get("REMOTE_EXPLORER_BROWSER_EXECUTABLE"),
+        help="Path to Chrome, Edge, or Chromium for --browser-engine chromium/auto.",
+    )
+    parser.add_argument(
         "--allow-evaluate-js",
         action="store_true",
         help="Enable the dangerous evaluate_js command for development only",
@@ -62,12 +73,15 @@ def main(argv: list[str] | None = None) -> int:
         data_dir=args.data_dir,
         start_url=args.start_url,
         allow_evaluate_js=args.allow_evaluate_js,
+        browser_engine=args.browser_engine,
+        browser_executable=args.browser_executable,
     )
 
     try:
         from PySide6.QtWidgets import QApplication
 
         from .browser import BrowserWindow
+        from .chromium_backend import ChromiumBrowserWindow, ChromiumUnavailable
         from .control import ControlService
         from .discovery import DiscoveryService
         from .security import AuthManager
@@ -82,9 +96,14 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv[:1])
     server_id = load_or_create_server_id(config)
-    window = BrowserWindow(config)
+    window = create_browser_window(config, BrowserWindow, ChromiumBrowserWindow, ChromiumUnavailable)
     auth_manager = AuthManager(config.password)
-    discovery = DiscoveryService(config, server_id, window)
+    discovery = DiscoveryService(
+        config,
+        server_id,
+        window,
+        capabilities=getattr(window.controller, "capabilities", None),
+    )
     control = ControlService(config, auth_manager, window.controller.handle, window)
 
     window.statusBar().showMessage(
@@ -99,6 +118,25 @@ def main(argv: list[str] | None = None) -> int:
     window.log_listener = log_listener
 
     return app.exec()
+
+
+def create_browser_window(
+    config: ServerConfig,
+    qt_window_type: type,
+    chromium_window_type: type,
+    chromium_unavailable_type: type[Exception],
+):
+    if config.browser_engine in {"auto", "chromium"}:
+        try:
+            return chromium_window_type(config)
+        except chromium_unavailable_type as exc:
+            if config.browser_engine == "chromium":
+                raise
+            logging.getLogger("remote_explorer.main").warning(
+                "Chromium browser engine unavailable, falling back to Qt WebEngine: %s",
+                exc,
+            )
+    return qt_window_type(config)
 
 
 if __name__ == "__main__":

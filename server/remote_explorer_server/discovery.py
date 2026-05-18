@@ -34,10 +34,17 @@ CAPABILITIES = [
 
 
 class DiscoveryService(QObject):
-    def __init__(self, config: ServerConfig, server_id: str, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        config: ServerConfig,
+        server_id: str,
+        parent: QObject | None = None,
+        capabilities: list[str] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.config = config
         self.server_id = server_id
+        self.capabilities = capabilities or CAPABILITIES
         self.socket = QUdpSocket(self)
         flags = QUdpSocket.ShareAddress | QUdpSocket.ReuseAddressHint
         if not self.socket.bind(QHostAddress.AnyIPv4, config.discovery_port, flags):
@@ -76,7 +83,7 @@ class DiscoveryService(QObject):
                 "name": self.config.name,
                 "control_port": self.config.control_port,
                 "auth": "password" if self.config.password else "none",
-                "capabilities": CAPABILITIES,
+                "capabilities": self.capabilities,
             },
         }
         self.socket.writeDatagram(encode_message(message), host, port)

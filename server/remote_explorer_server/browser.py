@@ -19,6 +19,13 @@ from .webrtc import BrowserWebRtcService
 
 BrowserResponder = Callable[[dict[str, Any]], None]
 
+CHROME_COMPAT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/148.0.7778.168 Safari/537.36"
+)
+CHROME_COMPAT_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+
 REMOTE_INPUT_HELPERS = r"""
   const remoteExplorerEditableSelector = [
     "textarea",
@@ -369,10 +376,33 @@ MEDIA_CONTROL_HELPERS = r"""
 LOGGER = logging.getLogger("remote_explorer.browser")
 
 
+def configure_web_engine_profile(profile: QWebEngineProfile) -> None:
+    profile.setHttpUserAgent(CHROME_COMPAT_USER_AGENT)
+    profile.setHttpAcceptLanguage(CHROME_COMPAT_ACCEPT_LANGUAGE)
+    configure_web_engine_settings(profile.settings())
+
+
+def configure_web_engine_settings(settings: QWebEngineSettings) -> None:
+    for attribute, enabled in (
+        (QWebEngineSettings.WebAttribute.JavascriptEnabled, True),
+        (QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True),
+        (QWebEngineSettings.WebAttribute.AllowWindowActivationFromJavaScript, True),
+        (QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True),
+        (QWebEngineSettings.WebAttribute.PluginsEnabled, True),
+        (QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False),
+        (QWebEngineSettings.WebAttribute.WebGLEnabled, True),
+        (QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True),
+        (QWebEngineSettings.WebAttribute.LocalStorageEnabled, True),
+        (QWebEngineSettings.WebAttribute.ReadingFromCanvasEnabled, True),
+    ):
+        settings.setAttribute(attribute, enabled)
+
+
 class PopupRedirectPage(QWebEnginePage):
     def __init__(self, opener: QWebEnginePage) -> None:
         super().__init__(opener.profile(), opener)
         self.opener = opener
+        configure_web_engine_settings(self.settings())
 
     def acceptNavigationRequest(self, url: QUrl, navigation_type: Any, is_main_frame: bool) -> bool:
         if is_main_frame and url.isValid() and not url.isEmpty() and url.toString() != "about:blank":
@@ -419,11 +449,11 @@ class BrowserWindow(QMainWindow):
         self.profile.setPersistentStoragePath(str(profile_dir))
         self.profile.setCachePath(str(cache_dir))
         self.profile.setPersistentCookiesPolicy(QWebEngineProfile.ForcePersistentCookies)
-        self.profile.settings().setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
+        configure_web_engine_profile(self.profile)
 
         self.view = QWebEngineView(self)
         self.page = SinglePageWebEnginePage(self.profile, self)
-        self.page.settings().setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
+        configure_web_engine_settings(self.page.settings())
         self.view.setPage(self.page)
         self.setCentralWidget(self.view)
 

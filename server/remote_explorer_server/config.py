@@ -19,6 +19,8 @@ class ServerConfig:
     data_dir: Path
     start_url: str
     allow_evaluate_js: bool = False
+    browser_engine: str = "auto"
+    browser_executable: str | None = None
 
     @property
     def server_id_path(self) -> Path:
