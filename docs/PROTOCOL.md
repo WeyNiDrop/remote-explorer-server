@@ -184,6 +184,12 @@ Coordinates are CSS viewport pixels.
 the received point from the streamed source viewport into the current browser
 CSS viewport before dispatching click events.
 
+Click results include flattened JavaScript result fields in addition to the
+`js` object. Editable targets report `editable`, `input_value`, `input_type`,
+and `input_tag`. Video targets may report `media_fullscreen_requested`; clients
+should keep the active preview stream running while the server browser enters
+or exits fullscreen.
+
 ### `click_selector`
 
 ```json
@@ -203,6 +209,8 @@ Types into the focused element.
 ```json
 { "selector": "input[name=q]", "text": "search term", "submit": false }
 ```
+
+If `selector` is omitted or empty, the server writes to `document.activeElement`.
 
 ### `scroll`
 

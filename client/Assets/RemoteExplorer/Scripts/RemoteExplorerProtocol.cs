@@ -321,6 +321,16 @@ namespace RemoteExplorer
         public int fps;
         public bool available;
         public string error;
+        public bool clicked;
+        public bool editable;
+        public string input_value;
+        public string input_type;
+        public string input_tag;
+        public string tag;
+        public string targetTag;
+        public string id;
+        public string text;
+        public bool media_fullscreen_requested;
     }
 
     [Serializable]

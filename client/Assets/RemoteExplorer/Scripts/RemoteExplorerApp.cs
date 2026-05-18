@@ -18,6 +18,9 @@ namespace RemoteExplorer
     [DefaultExecutionOrder(-10000)]
     public class RemoteExplorerApp : MonoBehaviour
     {
+        private static RemoteExplorerApp instance;
+        private static int nextInstanceId;
+
         private const float RemotePreviewPreferredHeight = 780f;
         private const float RemotePreviewMinHeight = 320f;
         private const float StreamStatusIntervalSeconds = 0.5f;
@@ -44,6 +47,10 @@ namespace RemoteExplorer
         private Button backButton;
         private Button forwardButton;
         private Button reloadButton;
+        private GameObject remoteInputPanel;
+        private InputField remoteTextInput;
+        private Button remoteInputDoneButton;
+        private Button remoteInputCancelButton;
         private Dropdown streamModeDropdown;
         private Dropdown streamResolutionDropdown;
         private Slider streamFpsSlider;
@@ -71,19 +78,37 @@ namespace RemoteExplorer
         private uint streamRenderLastFrameId;
         private bool streamRenderHasFrameId;
         private bool streamRestartInFlight;
+        private bool streamStartInFlight;
         private bool streamSettingsDirty;
         private float streamSettingsApplyAt = -1f;
         private RemoteStreamMode activeStreamMode = RemoteStreamMode.UdpJpeg;
         private bool hasActiveStreamMode;
+        private bool suppressRemoteInputEndEdit;
+        private bool remoteInputCommitInFlight;
+        private int remoteInputVersion;
         private bool canvasReady;
         private string fallbackPassword = string.Empty;
         private string fallbackUrl = "https://example.com";
         private string currentStatus = "Starting...";
         private string fatalUiError;
+        private int instanceId;
 
         private void Awake()
         {
             RemoteExplorerDiagnostics.Initialize();
+            if (instance != null && instance != this)
+            {
+                RemoteExplorerDiagnostics.Info(
+                    $"Duplicate RemoteExplorerApp destroyed name={gameObject.name} existing={instance.gameObject.name}");
+                Destroy(gameObject);
+                return;
+            }
+
+            instance = this;
+            instanceId = ++nextInstanceId;
+            DontDestroyOnLoad(gameObject);
+            RemoteExplorerDiagnostics.Info($"RemoteExplorerApp awake instance={instanceId}");
+
             lifetime = new CancellationTokenSource();
             settings = RemoteExplorerSettings.Load();
             fallbackPassword = settings.Password ?? string.Empty;
@@ -114,6 +139,11 @@ namespace RemoteExplorer
 
         private void OnDestroy()
         {
+            if (instance == this)
+            {
+                instance = null;
+            }
+
             lifetime?.Cancel();
             lifetime?.Dispose();
             client.Dispose();
@@ -328,6 +358,13 @@ namespace RemoteExplorer
             reloadButton = CreateCompactButton(navRow.transform, "Reload", () => FireAndForget(() => SendSimpleCommandAsync("reload")), 126);
             CreateCompactButton(navRow.transform, "Status", () => FireAndForget(() => SendSimpleCommandAsync("status")), 118);
 
+            remoteInputPanel = CreateCompactRow(parent, "Remote Input Row", 50);
+            remoteTextInput = CreateInput(remoteInputPanel.transform, "Page input", 50, false);
+            remoteTextInput.onEndEdit.AddListener(_ => RemoteInputEndEdit());
+            remoteInputDoneButton = CreateCompactButton(remoteInputPanel.transform, "Done", RemoteInputDoneClicked, 110);
+            remoteInputCancelButton = CreateCompactButton(remoteInputPanel.transform, "Cancel", RemoteInputCancelClicked, 130);
+            remoteInputPanel.SetActive(false);
+
             CreateStreamPreview(parent);
         }
 
@@ -484,27 +521,40 @@ namespace RemoteExplorer
 
         private async Task StartStreamAsync()
         {
+            if (streamStartInFlight)
+            {
+                RemoteExplorerDiagnostics.Info("Stream start ignored because another start is already in flight.");
+                return;
+            }
+
             if (!client.IsConnected)
             {
                 SetStatus("Connect to a server first");
                 return;
             }
 
-            var mode = SelectedStreamMode();
-            var resolution = SelectedStreamResolution();
-            var fps = SelectedStreamFps();
-            RemoteExplorerDiagnostics.Info($"Stream start requested mode={StreamModeLabel(mode)} resolution={resolution} fps={fps}");
-            // 切换模式前先关掉另一条传输，避免两路串流争抢服务端抓图资源。
-            // Stop the inactive transport first so both modes do not compete for server captures.
-            await StopInactiveStreamTransportsAsync(mode);
-
-            if (mode == RemoteStreamMode.WebRtc)
+            streamStartInFlight = true;
+            try
             {
-                await StartWebRtcStreamAsync(resolution, fps);
-                return;
-            }
+                var mode = SelectedStreamMode();
+                var resolution = SelectedStreamResolution();
+                var fps = SelectedStreamFps();
+                RemoteExplorerDiagnostics.Info($"Stream start requested mode={StreamModeLabel(mode)} resolution={resolution} fps={fps}");
+                // Stop the inactive transport first so both modes do not compete for server captures.
+                await StopInactiveStreamTransportsAsync(mode);
 
-            await StartUdpStreamAsync(resolution, fps);
+                if (mode == RemoteStreamMode.WebRtc)
+                {
+                    await StartWebRtcStreamAsync(resolution, fps);
+                    return;
+                }
+
+                await StartUdpStreamAsync(resolution, fps);
+            }
+            finally
+            {
+                streamStartInFlight = false;
+            }
         }
 
         private async Task StartWebRtcStreamAsync(string resolution, int fps)
@@ -838,9 +888,164 @@ namespace RemoteExplorer
             SetStreamStatus($"Tap {Mathf.RoundToInt(x)}, {Mathf.RoundToInt(y)}");
             RemoteExplorerDiagnostics.Info(
                 $"Stream tap normalized=({normalized.x:F3},{normalized.y:F3}) uv=({visibleX:F3},{visibleY:F3}) viewport=({Mathf.RoundToInt(x)},{Mathf.RoundToInt(y)}) source={latestSourceWidth}x{latestSourceHeight}");
+            try
+            {
+                var result = await client.ClickAsync(x, y, latestSourceWidth, latestSourceHeight, lifetime.Token);
+                if (result.ok || result.type == "result")
+                {
+                    var click = result.result;
+                    if (click != null && click.editable)
+                    {
+                        ShowRemoteInput(click.input_value);
+                        SetStatus("Page input selected");
+                        SetStreamStatus("Input focused");
+                        return;
+                    }
+
+                    if (click != null && click.media_fullscreen_requested)
+                    {
+                        SetStatus("Video fullscreen on server");
+                        return;
+                    }
+
+                    SetStatus($"Clicked {Mathf.RoundToInt(x)}, {Mathf.RoundToInt(y)}");
+                    return;
+                }
+
+                var error = result.error != null ? $"{result.error.code}: {result.error.message}" : "Unknown error";
+                SetStatus("Click failed: " + error);
+            }
+            catch (Exception ex)
+            {
+                SetStatus("Click failed: " + ex.Message);
+            }
+        }
+
+        private async Task SwipePreviewAsync(Vector2 deltaNormalized)
+        {
+            if (!client.IsConnected)
+            {
+                SetStatus("Connect to a server first");
+                return;
+            }
+
+            if (latestSourceWidth <= 1 || latestSourceHeight <= 1)
+            {
+                SetStatus("Wait for a stream frame before swiping");
+                return;
+            }
+
+            var dx = -deltaNormalized.x * latestSourceWidth;
+            var dy = deltaNormalized.y * latestSourceHeight;
+            if (Mathf.Abs(dx) < 4f && Mathf.Abs(dy) < 4f)
+            {
+                return;
+            }
+
+            SetStreamStatus($"Scroll {Mathf.RoundToInt(dx)}, {Mathf.RoundToInt(dy)}");
+            RemoteExplorerDiagnostics.Info(
+                $"Stream swipe delta=({deltaNormalized.x:F3},{deltaNormalized.y:F3}) scroll=({dx:F1},{dy:F1}) source={latestSourceWidth}x{latestSourceHeight}");
             await RunCommandAsync(
-                () => client.ClickAsync(x, y, latestSourceWidth, latestSourceHeight, lifetime.Token),
-                $"Clicked {Mathf.RoundToInt(x)}, {Mathf.RoundToInt(y)}");
+                () => client.ScrollAsync(dx, dy, lifetime.Token),
+                "Scrolled page");
+        }
+
+        private void ShowRemoteInput(string value)
+        {
+            if (remoteInputPanel == null || remoteTextInput == null)
+            {
+                return;
+            }
+
+            remoteInputVersion++;
+            suppressRemoteInputEndEdit = true;
+            remoteInputPanel.SetActive(true);
+            remoteTextInput.text = value ?? string.Empty;
+            remoteTextInput.caretPosition = remoteTextInput.text.Length;
+            remoteTextInput.selectionAnchorPosition = remoteTextInput.text.Length;
+            remoteTextInput.selectionFocusPosition = remoteTextInput.text.Length;
+            Canvas.ForceUpdateCanvases();
+            remoteTextInput.Select();
+            remoteTextInput.ActivateInputField();
+            suppressRemoteInputEndEdit = false;
+        }
+
+        private void RemoteInputEndEdit()
+        {
+            if (suppressRemoteInputEndEdit || remoteInputCommitInFlight || IsRemoteInputActionSelected())
+            {
+                return;
+            }
+
+            var version = remoteInputVersion;
+            FireAndForget(() => CommitRemoteInputAsync(version));
+        }
+
+        private bool IsRemoteInputActionSelected()
+        {
+            var current = EventSystem.current != null ? EventSystem.current.currentSelectedGameObject : null;
+            if (current == null)
+            {
+                return false;
+            }
+
+            return (remoteInputDoneButton != null && current == remoteInputDoneButton.gameObject) ||
+                (remoteInputCancelButton != null && current == remoteInputCancelButton.gameObject);
+        }
+
+        private void RemoteInputDoneClicked()
+        {
+            var version = remoteInputVersion;
+            FireAndForget(() => CommitRemoteInputAsync(version));
+        }
+
+        private void RemoteInputCancelClicked()
+        {
+            HideRemoteInput(true);
+            SetStatus("Input cancelled");
+        }
+
+        private async Task CommitRemoteInputAsync(int version)
+        {
+            if (version != remoteInputVersion || remoteTextInput == null || remoteInputCommitInFlight)
+            {
+                return;
+            }
+
+            remoteInputCommitInFlight = true;
+            suppressRemoteInputEndEdit = true;
+            var text = remoteTextInput.text ?? string.Empty;
+            SetStreamStatus("Sending input...");
+            try
+            {
+                await RunCommandAsync(
+                    () => client.SetFocusedInputAsync(text, false, lifetime.Token),
+                    "Input sent");
+                HideRemoteInput(false);
+            }
+            finally
+            {
+                suppressRemoteInputEndEdit = false;
+                remoteInputCommitInFlight = false;
+            }
+        }
+
+        private void HideRemoteInput(bool suppressEndEdit)
+        {
+            if (remoteInputPanel == null)
+            {
+                return;
+            }
+
+            var previousSuppress = suppressRemoteInputEndEdit;
+            suppressRemoteInputEndEdit = suppressEndEdit || previousSuppress;
+            if (remoteTextInput != null)
+            {
+                remoteTextInput.DeactivateInputField();
+            }
+
+            remoteInputPanel.SetActive(false);
+            suppressRemoteInputEndEdit = previousSuppress;
         }
 
         private async Task RunCommandAsync(Func<Task<CommandEnvelope>> action, string successMessage)
@@ -1017,6 +1222,8 @@ namespace RemoteExplorer
             SetButtonInteractable(forwardButton, enabled);
             SetButtonInteractable(reloadButton, enabled);
             SetButtonInteractable(streamToggleButton, enabled);
+            SetButtonInteractable(remoteInputDoneButton, enabled);
+            SetButtonInteractable(remoteInputCancelButton, enabled);
         }
 
         private void SetStatus(string message)
@@ -1501,6 +1708,7 @@ namespace RemoteExplorer
 
             var streamView = previewObject.AddComponent<RemoteExplorerStreamView>();
             streamView.OnTap = point => FireAndForget(() => ClickPreviewAsync(point));
+            streamView.OnSwipe = delta => FireAndForget(() => SwipePreviewAsync(delta));
 
 #if REMOTE_EXPLORER_HAS_WEBRTC
             webRtcPlayback = gameObject.GetComponent<RemoteExplorerWebRtcPlayback>();

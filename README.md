@@ -64,7 +64,12 @@ Implemented client features:
   the server console through an asynchronous logger. Unity client diagnostics
   are written to `remote-explorer-stream.log` under `Application.persistentDataPath`;
   the Unity Console prints that path once at startup.
-- Tap preview to click the remote webpage.
+- Tap preview to click the remote webpage. Swipe the preview to scroll the page.
+- Tapping a webpage input opens the Unity-side input field and writes the text
+  back to the focused remote element.
+- Video fullscreen is handled by the server browser while the active client
+  preview stream keeps running, so remote control can continue after exiting
+  fullscreen.
 
 The client UI is created at runtime by `RemoteExplorerBootstrap`, so an empty
 Unity scene can be used directly.

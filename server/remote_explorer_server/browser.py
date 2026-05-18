@@ -6,9 +6,10 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt, QTimer, QUrl
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QLineEdit, QMainWindow, QToolBar
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from .config import ServerConfig
@@ -36,14 +37,17 @@ class BrowserWindow(QMainWindow):
         self.profile.setPersistentStoragePath(str(profile_dir))
         self.profile.setCachePath(str(cache_dir))
         self.profile.setPersistentCookiesPolicy(QWebEngineProfile.ForcePersistentCookies)
+        self.profile.settings().setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
 
         self.view = QWebEngineView(self)
         self.page = QWebEnginePage(self.profile, self)
+        self.page.settings().setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
         self.view.setPage(self.page)
         self.setCentralWidget(self.view)
 
         self.address_bar = QLineEdit(self)
         self.address_bar.returnPressed.connect(self._navigate_from_bar)
+        self.toolbar: QToolBar | None = None
         self._build_toolbar()
 
         self.stream_service = BrowserStreamService(self.view, self)
@@ -54,6 +58,7 @@ class BrowserWindow(QMainWindow):
             self.webrtc_service,
             config.allow_evaluate_js,
         )
+        self.page.fullScreenRequested.connect(self._handle_fullscreen_request)
         self.view.urlChanged.connect(lambda url: self.address_bar.setText(url.toString()))
         self.view.titleChanged.connect(lambda title: self.setWindowTitle(f"{title} - {config.name}"))
 
@@ -67,9 +72,25 @@ class BrowserWindow(QMainWindow):
         toolbar.addAction("Reload", self.view.reload)
         toolbar.addWidget(self.address_bar)
         self.addToolBar(toolbar)
+        self.toolbar = toolbar
 
     def _navigate_from_bar(self) -> None:
         self.view.setUrl(QUrl(normalize_url(self.address_bar.text())))
+
+    def _handle_fullscreen_request(self, request: Any) -> None:
+        toggle_on = bool(request.toggleOn())
+        if toggle_on:
+            LOGGER.info("Browser fullscreen requested")
+            request.accept()
+            if self.toolbar is not None:
+                self.toolbar.hide()
+            self.showFullScreen()
+            return
+
+        request.accept()
+        self.showNormal()
+        if self.toolbar is not None:
+            self.toolbar.show()
 
 
 class BrowserController:
@@ -123,14 +144,18 @@ class BrowserController:
         respond(_ok({"accepted": True, "url": url}))
 
     def _click(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
-        x = float(payload.get("x", 0))
-        y = float(payload.get("y", 0))
+        raw_x = float(payload.get("x", 0))
+        raw_y = float(payload.get("y", 0))
+        source_width = float(payload.get("source_width", 0) or 0)
+        source_height = float(payload.get("source_height", 0) or 0)
+        view_x, view_y = self._map_stream_point_to_view(raw_x, raw_y, source_width, source_height)
+        native_click = self._send_native_click(view_x, view_y)
         script = f"""
 (() => {{
   const sourceWidth = Number({json.dumps(payload.get("source_width", 0))}) || 0;
   const sourceHeight = Number({json.dumps(payload.get("source_height", 0))}) || 0;
-  const rawX = Number({json.dumps(x)}) || 0;
-  const rawY = Number({json.dumps(y)}) || 0;
+  const rawX = Number({json.dumps(raw_x)}) || 0;
+  const rawY = Number({json.dumps(raw_y)}) || 0;
   const requestedX = sourceWidth > 1 ? rawX * window.innerWidth / sourceWidth : rawX;
   const requestedY = sourceHeight > 1 ? rawY * window.innerHeight / sourceHeight : rawY;
   const x = Math.max(0, Math.min(window.innerWidth - 1, requestedX));
@@ -152,50 +177,56 @@ class BrowserController:
     "[tabindex]"
   ].join(",");
   const target = el.closest ? (el.closest(selector) || el) : el;
-  const base = {{
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-    view: window,
-    clientX: x,
-    clientY: y,
-    screenX: window.screenX + x,
-    screenY: window.screenY + y,
-    button: 0
+  const editableSelector = [
+    "textarea",
+    "input:not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
+    "[contenteditable='true']",
+    "[contenteditable='plaintext-only']"
+  ].join(",");
+  const isEditable = candidate => {{
+    if (!candidate) return false;
+    if (candidate.isContentEditable) return true;
+    if (!candidate.matches || !candidate.matches(editableSelector)) return false;
+    if (candidate.disabled || candidate.readOnly) return false;
+    return true;
   }};
-  const pointerBase = {{
-    ...base,
-    pointerId: 1,
-    pointerType: "touch",
-    isPrimary: true,
-    width: 1,
-    height: 1,
-    pressure: 0.5
-  }};
-  const dispatchMouse = (name, extra = {{}}) => target.dispatchEvent(new MouseEvent(name, {{ ...base, ...extra }}));
-  const dispatchPointer = (name, extra = {{}}) => {{
-    try {{
-      return target.dispatchEvent(new PointerEvent(name, {{ ...pointerBase, ...extra }}));
-    }} catch (_) {{
-      return true;
+  const activeEditable = () => isEditable(document.activeElement) ? document.activeElement : null;
+  const editableFor = candidate => {{
+    if (isEditable(candidate)) return candidate;
+    if (candidate && candidate.tagName === "LABEL" && candidate.control && isEditable(candidate.control)) {{
+      return candidate.control;
     }}
+    const closest = candidate && candidate.closest ? candidate.closest(editableSelector) : null;
+    return isEditable(closest) ? closest : null;
   }};
+  const videoAtPoint = () => {{
+    const direct = el.tagName === "VIDEO" ? el : (el.closest ? el.closest("video") : null);
+    if (direct) return direct;
+    const videos = Array.from(document.querySelectorAll("video"))
+      .filter(video => {{
+        const rect = video.getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1 &&
+          x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      }})
+      .sort((a, b) => {{
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return (br.width * br.height) - (ar.width * ar.height);
+      }});
+    return videos[0] || null;
+  }};
+  const video = videoAtPoint();
+  const fullscreenElement =
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.mozFullScreenElement ||
+    document.msFullscreenElement;
 
-  dispatchPointer("pointerover", {{ buttons: 0, pressure: 0 }});
-  dispatchMouse("mouseover", {{ buttons: 0 }});
-  dispatchPointer("pointermove", {{ buttons: 0, pressure: 0 }});
-  dispatchMouse("mousemove", {{ buttons: 0 }});
-  dispatchPointer("pointerdown", {{ buttons: 1 }});
-  dispatchMouse("mousedown", {{ buttons: 1 }});
-  if (typeof target.focus === "function") {{
-    try {{ target.focus({{ preventScroll: true }}); }} catch (_) {{ target.focus(); }}
-  }}
-  dispatchPointer("pointerup", {{ buttons: 0, pressure: 0 }});
-  dispatchMouse("mouseup", {{ buttons: 0 }});
-  const clickAccepted = dispatchMouse("click", {{ buttons: 0, detail: 1 }});
-  try {{
-    if (clickAccepted && typeof target.click === "function") target.click();
-  }} catch (_) {{}}
+  const editable = activeEditable() || editableFor(target) || editableFor(el);
+  const inputType = editable && editable.getAttribute ? (editable.getAttribute("type") || "") : "";
+  const inputValue = editable
+    ? (editable.isContentEditable ? (editable.innerText || editable.textContent || "") : (editable.value || ""))
+    : "";
   return {{
     clicked: true,
     x,
@@ -209,11 +240,86 @@ class BrowserController:
     tag: el.tagName,
     targetTag: target.tagName,
     id: target.id || el.id || "",
-    text: (target.innerText || target.value || el.innerText || el.value || "").slice(0, 120)
+    text: (target.innerText || target.value || el.innerText || el.value || "").slice(0, 120),
+    editable: !!editable,
+    input_tag: editable ? editable.tagName : "",
+    input_type: inputType,
+    input_value: inputType.toLowerCase() === "password" ? "" : inputValue,
+    media_fullscreen_requested: !!fullscreenElement,
+    media_error: ""
   }};
 }})();
 """
-        self._run_js(script, respond)
+        def annotate(value: Any) -> Any:
+            if isinstance(value, dict):
+                value["native_click"] = native_click
+                value["view_x"] = view_x
+                value["view_y"] = view_y
+            return value
+
+        QTimer.singleShot(80, lambda: self._run_js(script, respond, annotate))
+
+    def _map_stream_point_to_view(
+        self,
+        raw_x: float,
+        raw_y: float,
+        source_width: float,
+        source_height: float,
+    ) -> tuple[float, float]:
+        view_width = max(1, self.view.width())
+        view_height = max(1, self.view.height())
+        x = raw_x * view_width / source_width if source_width > 1 else raw_x
+        y = raw_y * view_height / source_height if source_height > 1 else raw_y
+        return (
+            max(0.0, min(view_width - 1.0, x)),
+            max(0.0, min(view_height - 1.0, y)),
+        )
+
+    def _send_native_click(self, x: float, y: float) -> bool:
+        target = self.view.focusProxy() or self.view
+        if target is None:
+            return False
+
+        self.view.setFocus(Qt.FocusReason.OtherFocusReason)
+        view_point = QPoint(round(x), round(y))
+        global_point = self.view.mapToGlobal(view_point)
+        if target is self.view:
+            target_point = view_point
+        else:
+            target_point = target.mapFromGlobal(global_point)
+
+        local_pos = QPointF(target_point)
+        global_pos = QPointF(global_point)
+        events = (
+            QMouseEvent(
+                QEvent.Type.MouseMove,
+                local_pos,
+                global_pos,
+                Qt.MouseButton.NoButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+            QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                local_pos,
+                global_pos,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+            QMouseEvent(
+                QEvent.Type.MouseButtonRelease,
+                local_pos,
+                global_pos,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.NoButton,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+
+        for event in events:
+            QCoreApplication.sendEvent(target, event)
+        return True
 
     def _click_selector(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
         selector = str(payload.get("selector") or "")
@@ -268,7 +374,16 @@ class BrowserController:
   const selector = {json.dumps(selector)};
   const text = {json.dumps(text)};
   const submit = {json.dumps(submit)};
-  const el = document.querySelector(selector);
+  let el = null;
+  if (selector) {{
+    try {{
+      el = document.querySelector(selector);
+    }} catch (error) {{
+      return {{ set: false, reason: "invalid_selector", selector, error: String(error && error.message || error) }};
+    }}
+  }} else {{
+    el = document.activeElement;
+  }}
   if (!el) return {{ set: false, reason: "not_found", selector }};
   if (typeof el.focus === "function") el.focus();
   if (el.isContentEditable) {{
@@ -281,7 +396,7 @@ class BrowserController:
   el.dispatchEvent(new InputEvent("input", {{ bubbles: true, inputType: "insertText", data: text }}));
   el.dispatchEvent(new Event("change", {{ bubbles: true }}));
   if (submit && el.form && typeof el.form.requestSubmit === "function") el.form.requestSubmit();
-  return {{ set: true, tag: el.tagName }};
+  return {{ set: true, tag: el.tagName, active: !selector }};
 }})();
 """
         self._run_js(script, respond)
@@ -384,8 +499,21 @@ class BrowserController:
         script = str(payload.get("script") or "")
         self._run_js(script, respond)
 
-    def _run_js(self, script: str, respond: BrowserResponder) -> None:
-        self.view.page().runJavaScript(script, lambda value: respond(_ok({"js": value})))
+    def _run_js(
+        self,
+        script: str,
+        respond: BrowserResponder,
+        after: Callable[[Any], Any] | None = None,
+    ) -> None:
+        def done(value: Any) -> None:
+            try:
+                if after is not None:
+                    value = after(value)
+                respond(_ok(_normalize_js_result(value)))
+            except Exception as exc:
+                respond(_error("command_failed", str(exc)))
+
+        self.view.page().runJavaScript(script, done)
 
     @staticmethod
     def _respond_future(future: Future[dict[str, Any]], respond: BrowserResponder) -> None:
@@ -415,3 +543,9 @@ def _ok(result: dict[str, Any]) -> dict[str, Any]:
 
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"ok": False, "error": {"code": code, "message": message}}
+
+
+def _normalize_js_result(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {"js": value, **value}
+    return {"js": value}

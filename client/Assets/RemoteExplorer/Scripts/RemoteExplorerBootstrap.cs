@@ -4,12 +4,6 @@ namespace RemoteExplorer
 {
     public static class RemoteExplorerBootstrap
     {
-        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
-        private static void BootBeforeSceneLoad()
-        {
-            Boot();
-        }
-
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void BootAfterSceneLoad()
         {
@@ -18,7 +12,7 @@ namespace RemoteExplorer
 
         private static void Boot()
         {
-            if (Object.FindObjectOfType<RemoteExplorerApp>() != null)
+            if (Object.FindObjectOfType<RemoteExplorerApp>(true) != null)
             {
                 return;
             }

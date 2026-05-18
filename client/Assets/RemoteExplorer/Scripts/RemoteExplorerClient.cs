@@ -348,6 +348,36 @@ namespace RemoteExplorer
                 cancellationToken);
         }
 
+        public async Task<CommandEnvelope> ScrollAsync(
+            float dx,
+            float dy,
+            CancellationToken cancellationToken = default)
+        {
+            return await SendCommandAsync(
+                "scroll",
+                new Dictionary<string, object>
+                {
+                    ["dx"] = dx,
+                    ["dy"] = dy
+                },
+                cancellationToken);
+        }
+
+        public async Task<CommandEnvelope> SetFocusedInputAsync(
+            string text,
+            bool submit = false,
+            CancellationToken cancellationToken = default)
+        {
+            return await SendCommandAsync(
+                "set_input",
+                new Dictionary<string, object>
+                {
+                    ["text"] = text ?? string.Empty,
+                    ["submit"] = submit
+                },
+                cancellationToken);
+        }
+
         public async Task<CommandEnvelope> StartStreamAsync(
             string resolution = "360p",
             int fps = DefaultStreamFps,
