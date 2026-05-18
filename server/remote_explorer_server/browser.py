@@ -18,6 +18,130 @@ from .streaming import BrowserStreamService
 from .webrtc import BrowserWebRtcService
 
 BrowserResponder = Callable[[dict[str, Any]], None]
+
+REMOTE_INPUT_HELPERS = r"""
+  const remoteExplorerEditableSelector = [
+    "textarea",
+    "input:not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
+    "[contenteditable='true']",
+    "[contenteditable='plaintext-only']"
+  ].join(",");
+  const remoteExplorerIsEditable = candidate => {
+    if (!candidate) return false;
+    if (candidate.isContentEditable) return true;
+    if (!candidate.matches || !candidate.matches(remoteExplorerEditableSelector)) return false;
+    if (candidate.disabled || candidate.readOnly) return false;
+    return true;
+  };
+  const remoteExplorerEditableFor = candidate => {
+    if (remoteExplorerIsEditable(candidate)) return candidate;
+    if (candidate && candidate.tagName === "LABEL" && candidate.control && remoteExplorerIsEditable(candidate.control)) {
+      return candidate.control;
+    }
+    const closest = candidate && candidate.closest ? candidate.closest(remoteExplorerEditableSelector) : null;
+    return remoteExplorerIsEditable(closest) ? closest : null;
+  };
+  const remoteExplorerActiveEditable = () =>
+    remoteExplorerIsEditable(document.activeElement) ? document.activeElement : null;
+  const remoteExplorerStoredEditable = () => {
+    const stored = window.__remoteExplorerFocusedInput || null;
+    return remoteExplorerIsEditable(stored) && document.contains(stored) ? stored : null;
+  };
+  const remoteExplorerFocusEditable = el => {
+    if (!remoteExplorerIsEditable(el)) return null;
+    window.__remoteExplorerFocusedInput = el;
+    if (typeof el.focus === "function") {
+      try {
+        el.focus({ preventScroll: true });
+      } catch (_) {
+        el.focus();
+      }
+    }
+    return el;
+  };
+  const remoteExplorerReadEditableValue = el => {
+    if (!el) return "";
+    return el.isContentEditable ? (el.innerText || el.textContent || "") : (el.value || "");
+  };
+  const remoteExplorerSetNativeValue = (el, text) => {
+    const proto =
+      window.HTMLTextAreaElement && el instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : window.HTMLInputElement && el instanceof HTMLInputElement
+          ? HTMLInputElement.prototype
+          : null;
+    const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, "value") : null;
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(el, text);
+    } else {
+      el.value = text;
+    }
+  };
+  const remoteExplorerDispatchInput = (el, inputType, data = null) => {
+    try {
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType, data }));
+    } catch (_) {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  };
+  const remoteExplorerSetEditableText = (el, text) => {
+    if (el.isContentEditable) {
+      el.textContent = text;
+      remoteExplorerDispatchInput(el, "insertText", text);
+      return true;
+    }
+    if ("value" in el) {
+      remoteExplorerSetNativeValue(el, text);
+      try {
+        el.setSelectionRange(text.length, text.length);
+      } catch (_) {}
+      remoteExplorerDispatchInput(el, "insertText", text);
+      return true;
+    }
+    return false;
+  };
+  const remoteExplorerInsertEditableText = (el, text) => {
+    if (el.isContentEditable) {
+      document.execCommand("insertText", false, text);
+      return true;
+    }
+    if ("value" in el) {
+      const value = String(el.value || "");
+      const start = typeof el.selectionStart === "number" ? el.selectionStart : value.length;
+      const end = typeof el.selectionEnd === "number" ? el.selectionEnd : value.length;
+      const next = value.slice(0, start) + text + value.slice(end);
+      const caret = start + text.length;
+      remoteExplorerSetNativeValue(el, next);
+      try {
+        el.setSelectionRange(caret, caret);
+      } catch (_) {}
+      remoteExplorerDispatchInput(el, "insertText", text);
+      return true;
+    }
+    return false;
+  };
+  const remoteExplorerBackspaceEditable = el => {
+    if (el.isContentEditable) {
+      document.execCommand("delete", false);
+      return true;
+    }
+    if ("value" in el) {
+      const value = String(el.value || "");
+      const start = typeof el.selectionStart === "number" ? el.selectionStart : value.length;
+      const end = typeof el.selectionEnd === "number" ? el.selectionEnd : value.length;
+      if (start === 0 && end === 0) return true;
+      const deleteStart = start === end ? Math.max(0, start - 1) : start;
+      const next = value.slice(0, deleteStart) + value.slice(end);
+      remoteExplorerSetNativeValue(el, next);
+      try {
+        el.setSelectionRange(deleteStart, deleteStart);
+      } catch (_) {}
+      remoteExplorerDispatchInput(el, "deleteContentBackward");
+      return true;
+    }
+    return false;
+  };
+"""
 LOGGER = logging.getLogger("remote_explorer.browser")
 
 
@@ -177,28 +301,7 @@ class BrowserController:
     "[tabindex]"
   ].join(",");
   const target = el.closest ? (el.closest(selector) || el) : el;
-  const editableSelector = [
-    "textarea",
-    "input:not([type='button']):not([type='submit']):not([type='reset']):not([type='checkbox']):not([type='radio']):not([type='file'])",
-    "[contenteditable='true']",
-    "[contenteditable='plaintext-only']"
-  ].join(",");
-  const isEditable = candidate => {{
-    if (!candidate) return false;
-    if (candidate.isContentEditable) return true;
-    if (!candidate.matches || !candidate.matches(editableSelector)) return false;
-    if (candidate.disabled || candidate.readOnly) return false;
-    return true;
-  }};
-  const activeEditable = () => isEditable(document.activeElement) ? document.activeElement : null;
-  const editableFor = candidate => {{
-    if (isEditable(candidate)) return candidate;
-    if (candidate && candidate.tagName === "LABEL" && candidate.control && isEditable(candidate.control)) {{
-      return candidate.control;
-    }}
-    const closest = candidate && candidate.closest ? candidate.closest(editableSelector) : null;
-    return isEditable(closest) ? closest : null;
-  }};
+{REMOTE_INPUT_HELPERS}
   const videoAtPoint = () => {{
     const direct = el.tagName === "VIDEO" ? el : (el.closest ? el.closest("video") : null);
     if (direct) return direct;
@@ -222,11 +325,13 @@ class BrowserController:
     document.mozFullScreenElement ||
     document.msFullscreenElement;
 
-  const editable = activeEditable() || editableFor(target) || editableFor(el);
+  const editable = remoteExplorerFocusEditable(
+    remoteExplorerEditableFor(target) ||
+    remoteExplorerEditableFor(el) ||
+    remoteExplorerActiveEditable()
+  );
   const inputType = editable && editable.getAttribute ? (editable.getAttribute("type") || "") : "";
-  const inputValue = editable
-    ? (editable.isContentEditable ? (editable.innerText || editable.textContent || "") : (editable.value || ""))
-    : "";
+  const inputValue = editable ? remoteExplorerReadEditableValue(editable) : "";
   return {{
     clicked: true,
     x,
@@ -346,21 +451,14 @@ class BrowserController:
         script = f"""
 (() => {{
   const text = {json.dumps(text)};
-  const el = document.activeElement;
+{REMOTE_INPUT_HELPERS}
+  const el = remoteExplorerFocusEditable(remoteExplorerActiveEditable() || remoteExplorerStoredEditable());
   if (!el) return {{ inserted: false, reason: "no_active_element" }};
-  if (el.isContentEditable) {{
-    document.execCommand("insertText", false, text);
-    return {{ inserted: true, mode: "contenteditable" }};
+  if (!remoteExplorerInsertEditableText(el, text)) {{
+    return {{ inserted: false, reason: "active_element_not_editable", tag: el.tagName }};
   }}
-  if ("value" in el) {{
-    const start = el.selectionStart ?? el.value.length;
-    const end = el.selectionEnd ?? el.value.length;
-    el.setRangeText(text, start, end, "end");
-    el.dispatchEvent(new InputEvent("input", {{ bubbles: true, inputType: "insertText", data: text }}));
-    el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-    return {{ inserted: true, mode: "input" }};
-  }}
-  return {{ inserted: false, reason: "active_element_not_editable", tag: el.tagName }};
+  el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+  return {{ inserted: true, mode: el.isContentEditable ? "contenteditable" : "input", tag: el.tagName }};
 }})();
 """
         self._run_js(script, respond)
@@ -374,6 +472,7 @@ class BrowserController:
   const selector = {json.dumps(selector)};
   const text = {json.dumps(text)};
   const submit = {json.dumps(submit)};
+{REMOTE_INPUT_HELPERS}
   let el = null;
   if (selector) {{
     try {{
@@ -382,18 +481,13 @@ class BrowserController:
       return {{ set: false, reason: "invalid_selector", selector, error: String(error && error.message || error) }};
     }}
   }} else {{
-    el = document.activeElement;
+    el = remoteExplorerActiveEditable() || remoteExplorerStoredEditable();
   }}
+  el = remoteExplorerFocusEditable(remoteExplorerEditableFor(el) || el);
   if (!el) return {{ set: false, reason: "not_found", selector }};
-  if (typeof el.focus === "function") el.focus();
-  if (el.isContentEditable) {{
-    el.textContent = text;
-  }} else if ("value" in el) {{
-    el.value = text;
-  }} else {{
+  if (!remoteExplorerSetEditableText(el, text)) {{
     return {{ set: false, reason: "element_not_editable", tag: el.tagName }};
   }}
-  el.dispatchEvent(new InputEvent("input", {{ bubbles: true, inputType: "insertText", data: text }}));
   el.dispatchEvent(new Event("change", {{ bubbles: true }}));
   if (submit && el.form && typeof el.form.requestSubmit === "function") el.form.requestSubmit();
   return {{ set: true, tag: el.tagName, active: !selector }};
@@ -420,16 +514,18 @@ class BrowserController:
         script = f"""
 (() => {{
   const key = {json.dumps(key)};
-  const el = document.activeElement || document.body;
+{REMOTE_INPUT_HELPERS}
+  const editable = remoteExplorerFocusEditable(remoteExplorerActiveEditable() || remoteExplorerStoredEditable());
+  const el = editable || document.activeElement || document.body;
   const opts = {{ key, bubbles: true, cancelable: true }};
   el.dispatchEvent(new KeyboardEvent("keydown", opts));
   if (key === "Enter" && el.form && typeof el.form.requestSubmit === "function") el.form.requestSubmit();
-  if (key === "Backspace" && "value" in el) {{
-    const start = el.selectionStart ?? el.value.length;
-    const end = el.selectionEnd ?? el.value.length;
-    if (start !== end) el.setRangeText("", start, end, "end");
-    else if (start > 0) el.setRangeText("", start - 1, start, "end");
-    el.dispatchEvent(new InputEvent("input", {{ bubbles: true, inputType: "deleteContentBackward" }}));
+  if (key === "Backspace" && editable) {{
+    remoteExplorerBackspaceEditable(editable);
+    editable.dispatchEvent(new Event("change", {{ bubbles: true }}));
+  }}
+  if (key === "Escape" && editable && typeof editable.blur === "function") {{
+    editable.blur();
   }}
   el.dispatchEvent(new KeyboardEvent("keyup", opts));
   return {{ sent: true, key }};

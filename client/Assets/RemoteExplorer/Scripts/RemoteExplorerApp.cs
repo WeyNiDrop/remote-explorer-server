@@ -51,6 +51,7 @@ namespace RemoteExplorer
         private InputField remoteTextInput;
         private Button remoteInputDoneButton;
         private Button remoteInputCancelButton;
+        private readonly Queue<RemoteKeyboardCommand> remoteKeyboardCommands = new Queue<RemoteKeyboardCommand>();
         private Dropdown streamModeDropdown;
         private Dropdown streamResolutionDropdown;
         private Slider streamFpsSlider;
@@ -85,6 +86,7 @@ namespace RemoteExplorer
         private bool hasActiveStreamMode;
         private bool suppressRemoteInputEndEdit;
         private bool remoteInputCommitInFlight;
+        private bool remoteKeyboardFlushInFlight;
         private int remoteInputVersion;
         private bool canvasReady;
         private string fallbackPassword = string.Empty;
@@ -92,6 +94,12 @@ namespace RemoteExplorer
         private string currentStatus = "Starting...";
         private string fatalUiError;
         private int instanceId;
+
+        private struct RemoteKeyboardCommand
+        {
+            public string Kind;
+            public string Value;
+        }
 
         private void Awake()
         {
@@ -170,6 +178,7 @@ namespace RemoteExplorer
             }
 
             UpdateStreamWatchdog();
+            PollRemoteKeyboardInput();
         }
 
         private void OnGUI()
@@ -1046,6 +1055,157 @@ namespace RemoteExplorer
 
             remoteInputPanel.SetActive(false);
             suppressRemoteInputEndEdit = previousSuppress;
+        }
+
+        private void PollRemoteKeyboardInput()
+        {
+            if (!ShouldForwardRemoteKeyboardInput())
+            {
+                return;
+            }
+
+            var typed = Input.inputString;
+            var queuedBackspace = false;
+            var queuedEnter = false;
+            if (!string.IsNullOrEmpty(typed))
+            {
+                var textChunk = string.Empty;
+                foreach (var ch in typed)
+                {
+                    if (ch == '\b')
+                    {
+                        EnqueueRemoteText(textChunk);
+                        textChunk = string.Empty;
+                        EnqueueRemoteKey("Backspace");
+                        queuedBackspace = true;
+                        continue;
+                    }
+
+                    if (ch == '\n' || ch == '\r')
+                    {
+                        EnqueueRemoteText(textChunk);
+                        textChunk = string.Empty;
+                        EnqueueRemoteKey("Enter");
+                        queuedEnter = true;
+                        continue;
+                    }
+
+                    if (!char.IsControl(ch))
+                    {
+                        textChunk += ch;
+                    }
+                }
+
+                EnqueueRemoteText(textChunk);
+            }
+
+            if (!queuedBackspace && Input.GetKeyDown(KeyCode.Backspace))
+            {
+                EnqueueRemoteKey("Backspace");
+            }
+
+            if (!queuedEnter && (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)))
+            {
+                EnqueueRemoteKey("Enter");
+            }
+
+            if (Input.GetKeyDown(KeyCode.Escape))
+            {
+                EnqueueRemoteKey("Escape");
+            }
+        }
+
+        private bool ShouldForwardRemoteKeyboardInput()
+        {
+            if (!client.IsConnected || remotePage == null || !remotePage.activeInHierarchy)
+            {
+                return false;
+            }
+
+            return !IsLocalInputFocused();
+        }
+
+        private bool IsLocalInputFocused()
+        {
+            var current = EventSystem.current != null ? EventSystem.current.currentSelectedGameObject : null;
+            if (current == null)
+            {
+                return false;
+            }
+
+            var input = current.GetComponentInParent<InputField>();
+            return input != null && input.isFocused;
+        }
+
+        private void EnqueueRemoteText(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return;
+            }
+
+            EnqueueRemoteKeyboardCommand("text", text);
+        }
+
+        private void EnqueueRemoteKey(string key)
+        {
+            if (string.IsNullOrEmpty(key))
+            {
+                return;
+            }
+
+            EnqueueRemoteKeyboardCommand("key", key);
+        }
+
+        private void EnqueueRemoteKeyboardCommand(string kind, string value)
+        {
+            remoteKeyboardCommands.Enqueue(new RemoteKeyboardCommand
+            {
+                Kind = kind,
+                Value = value
+            });
+
+            if (!remoteKeyboardFlushInFlight)
+            {
+                FireAndForget(FlushRemoteKeyboardInputAsync);
+            }
+        }
+
+        private async Task FlushRemoteKeyboardInputAsync()
+        {
+            if (remoteKeyboardFlushInFlight)
+            {
+                return;
+            }
+
+            remoteKeyboardFlushInFlight = true;
+            try
+            {
+                while (remoteKeyboardCommands.Count > 0 && client.IsConnected)
+                {
+                    var command = remoteKeyboardCommands.Dequeue();
+                    var result = command.Kind == "key"
+                        ? await client.SendKeyAsync(command.Value, lifetime.Token)
+                        : await client.SendTextAsync(command.Value, lifetime.Token);
+                    if (!result.ok && result.type != "result")
+                    {
+                        var error = result.error != null
+                            ? $"{result.error.code}: {result.error.message}"
+                            : "Unknown error";
+                        SetStatus("Keyboard input failed: " + error);
+                        remoteKeyboardCommands.Clear();
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                remoteKeyboardFlushInFlight = false;
+                if (remoteKeyboardCommands.Count > 0 && client.IsConnected)
+                {
+                    FireAndForget(FlushRemoteKeyboardInputAsync);
+                }
+            }
         }
 
         private async Task RunCommandAsync(Func<Task<CommandEnvelope>> action, string successMessage)
