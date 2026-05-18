@@ -16,6 +16,8 @@ CAPABILITIES = [
     "set_input",
     "scroll",
     "key",
+    "media_status",
+    "media_control",
     "close_page",
     "back",
     "forward",

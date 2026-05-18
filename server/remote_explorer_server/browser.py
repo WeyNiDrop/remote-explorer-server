@@ -7,7 +7,7 @@ from concurrent.futures import Future
 from typing import Any
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt, QTimer, QUrl
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QLineEdit, QMainWindow, QToolBar
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -142,6 +142,230 @@ REMOTE_INPUT_HELPERS = r"""
     return false;
   };
 """
+
+MEDIA_CONTROL_HELPERS = r"""
+  const remoteExplorerVisibleScore = el => {
+    if (!el || !el.getBoundingClientRect) return 0;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return 0;
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity || 1) <= 0) return 0;
+    const visibleWidth = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
+    const visibleHeight = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+    return visibleWidth * visibleHeight;
+  };
+  const remoteExplorerMediaStatus = media => {
+    if (!media) {
+      return { media_found: false, media_reason: "no_media" };
+    }
+    return {
+      media_found: true,
+      media_tag: media.tagName,
+      media_paused: !!media.paused,
+      media_muted: !!media.muted,
+      media_volume: Number(media.volume || 0),
+      media_current_time: Number(media.currentTime || 0),
+      media_duration: Number.isFinite(media.duration) ? Number(media.duration) : 0,
+      media_fullscreen: !!(
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement ||
+        document.msFullscreenElement
+      ),
+      media_title: document.title || ""
+    };
+  };
+  const remoteExplorerFindMedia = () => {
+    const stored = window.__remoteExplorerMedia || null;
+    if (stored && document.contains(stored)) return stored;
+    const candidates = Array.from(document.querySelectorAll("video,audio"))
+      .map(media => {
+        const visible = remoteExplorerVisibleScore(media);
+        const playing = media.paused ? 0 : 1000000000;
+        const active = media.currentTime > 0 ? 10000000 : 0;
+        const hasSource = media.currentSrc || media.src ? 100000 : 0;
+        return { media, score: playing + active + hasSource + visible };
+      })
+      .filter(item => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+    const media = candidates.length ? candidates[0].media : null;
+    if (media) window.__remoteExplorerMedia = media;
+    return media;
+  };
+  const remoteExplorerPlayerRoot = media => {
+    let node = media;
+    let fallback = null;
+    for (let i = 0; node && i < 8; i += 1, node = node.parentElement) {
+      const marker = `${node.id || ""} ${node.className || ""} ${node.getAttribute("role") || ""}`.toLowerCase();
+      if (marker.includes("player") || marker.includes("control")) {
+        return node;
+      }
+      if (!fallback && (marker.includes("video") || marker.includes("media"))) fallback = node;
+    }
+    return fallback || media.parentElement || media;
+  };
+  const remoteExplorerPlayerScopes = media => {
+    const scopes = [];
+    let node = media;
+    for (let i = 0; node && i < 10; i += 1, node = node.parentElement) {
+      const marker = `${node.id || ""} ${node.className || ""} ${node.getAttribute("role") || ""}`.toLowerCase();
+      if (
+        marker.includes("player") ||
+        marker.includes("control") ||
+        marker.includes("video") ||
+        marker.includes("media")
+      ) {
+        scopes.push(node);
+      }
+    }
+    scopes.push(media.parentElement || media);
+    return Array.from(new Set(scopes)).filter(Boolean);
+  };
+  const remoteExplorerClickableText = el =>
+    [
+      el.getAttribute("aria-label") || "",
+      el.getAttribute("title") || "",
+      el.getAttribute("data-title") || "",
+      el.getAttribute("data-tooltip") || "",
+      el.id || "",
+      el.className || "",
+      el.textContent || ""
+    ].join(" ").toLowerCase();
+  const remoteExplorerBlockedMediaButton = el => {
+    const text = remoteExplorerClickableText(el);
+    if ([
+      "voice",
+      "microphone",
+      "mic",
+      "speech",
+      "dictation",
+      "search",
+      "record",
+      "recording",
+      "permission",
+      "语音",
+      "語音",
+      "麦克风",
+      "麥克風",
+      "搜索",
+      "搜尋",
+      "录音",
+      "錄音"
+    ].some(keyword => text.includes(keyword))) {
+      return true;
+    }
+    return !!(el.closest && el.closest("form,[role='search'],[type='search']"));
+  };
+  const remoteExplorerKeywordMatches = (text, keyword) => {
+    if (keyword === "next" || keyword === "prev") {
+      return new RegExp(`(^|[^a-z])${keyword}([^a-z]|$)`).test(text);
+    }
+    return text.includes(keyword);
+  };
+  const remoteExplorerFindButton = (media, keywordGroups) => {
+    const selector = "button,a,[role='button'],[aria-label],[title],[onclick]";
+    const scopes = remoteExplorerPlayerScopes(media);
+    const seen = new Set();
+    for (const scope of scopes) {
+      const buttons = Array.from(scope.querySelectorAll ? scope.querySelectorAll(selector) : []);
+      for (const button of buttons) {
+        if (seen.has(button)) continue;
+        seen.add(button);
+        if (remoteExplorerVisibleScore(button) <= 0) continue;
+        if (remoteExplorerBlockedMediaButton(button)) continue;
+        const text = remoteExplorerClickableText(button);
+        if (keywordGroups.some(group => group.every(keyword => remoteExplorerKeywordMatches(text, keyword)))) {
+          return button;
+        }
+      }
+    }
+    return null;
+  };
+  const remoteExplorerClickButton = button => {
+    if (!button) return false;
+    button.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true }));
+    button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    button.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0 }));
+    button.click();
+    return true;
+  };
+  const remoteExplorerRequestFullscreen = el => {
+    const target = remoteExplorerPlayerRoot(el) || el;
+    const requestTarget =
+      target.requestFullscreen ||
+      target.webkitRequestFullscreen ||
+      target.mozRequestFullScreen ||
+      target.msRequestFullscreen
+        ? target
+        : el;
+    const request =
+      requestTarget.requestFullscreen ||
+      requestTarget.webkitRequestFullscreen ||
+      requestTarget.mozRequestFullScreen ||
+      requestTarget.msRequestFullscreen;
+    if (!request) return false;
+    request.call(requestTarget);
+    return true;
+  };
+  const remoteExplorerExitFullscreen = () => {
+    const exit =
+      document.exitFullscreen ||
+      document.webkitExitFullscreen ||
+      document.mozCancelFullScreen ||
+      document.msExitFullscreen;
+    if (!exit) return false;
+    exit.call(document);
+    return true;
+  };
+  const remoteExplorerRunMediaAction = (media, action, amount) => {
+    window.__remoteExplorerMedia = media;
+    try {
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      if (!media.hasAttribute("tabindex")) media.setAttribute("tabindex", "-1");
+      if (media.focus) media.focus({ preventScroll: true });
+    } catch (_) {}
+    let controlled = true;
+    let reason = "";
+    if (action === "play_pause") {
+      if (media.paused || media.ended) {
+        const playResult = media.play();
+        if (playResult && typeof playResult.catch === "function") playResult.catch(() => {});
+      } else {
+        media.pause();
+      }
+    } else if (action === "fullscreen") {
+      controlled = remoteExplorerClickButton(remoteExplorerFindButton(media, [["fullscreen"], ["full", "screen"]]));
+      reason = controlled ? "" : "keyboard_shortcut_required";
+    } else if (action === "volume_up" || action === "volume_down") {
+      const step = amount > 0 ? amount : 0.1;
+      const delta = action === "volume_up" ? step : -step;
+      media.volume = Math.max(0, Math.min(1, Number(media.volume || 0) + delta));
+      if (action === "volume_up" && media.volume > 0) media.muted = false;
+    } else if (action === "mute") {
+      media.muted = !media.muted;
+    } else if (action === "seek_forward" || action === "seek_back") {
+      const step = amount > 0 ? amount : 10;
+      const delta = action === "seek_forward" ? step : -step;
+      const duration = Number.isFinite(media.duration) ? media.duration : Number.MAX_SAFE_INTEGER;
+      media.currentTime = Math.max(0, Math.min(duration, Number(media.currentTime || 0) + delta));
+    } else if (action === "next") {
+      controlled = remoteExplorerClickButton(remoteExplorerFindButton(media, [["next"]]));
+      if (!controlled) reason = "next_control_not_found";
+    } else if (action === "previous") {
+      controlled = remoteExplorerClickButton(remoteExplorerFindButton(media, [["previous"], ["prev"]]));
+      if (!controlled) reason = "previous_control_not_found";
+    } else {
+      controlled = false;
+      reason = "unsupported_media_action";
+    }
+    return {
+      ...remoteExplorerMediaStatus(media),
+      controlled,
+      media_action: action,
+      media_reason: reason
+    };
+  };
+"""
 LOGGER = logging.getLogger("remote_explorer.browser")
 
 
@@ -239,6 +463,8 @@ class BrowserController:
             "set_input": self._set_input,
             "scroll": self._scroll,
             "key": self._key,
+            "media_status": self._media_status,
+            "media_control": self._media_control,
             "close_page": self._close_page,
             "back": self._back,
             "forward": self._forward,
@@ -426,6 +652,38 @@ class BrowserController:
             QCoreApplication.sendEvent(target, event)
         return True
 
+    def _send_native_key(
+        self,
+        key: Qt.Key,
+        text: str = "",
+        modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier,
+    ) -> bool:
+        target = self.view.focusProxy() or self.view
+        if target is None:
+            return False
+
+        self.view.setFocus(Qt.FocusReason.OtherFocusReason)
+        events = (
+            QKeyEvent(QEvent.Type.KeyPress, key, modifiers, text),
+            QKeyEvent(QEvent.Type.KeyRelease, key, modifiers, text),
+        )
+        for event in events:
+            QCoreApplication.sendEvent(target, event)
+        return True
+
+    def _send_media_shortcut(self, action: str) -> bool:
+        shortcuts: dict[str, tuple[Qt.Key, str, Qt.KeyboardModifier]] = {
+            "fullscreen": (Qt.Key.Key_F, "f", Qt.KeyboardModifier.NoModifier),
+            "next": (Qt.Key.Key_N, "N", Qt.KeyboardModifier.ShiftModifier),
+            "previous": (Qt.Key.Key_P, "P", Qt.KeyboardModifier.ShiftModifier),
+        }
+        shortcut = shortcuts.get(action)
+        if not shortcut:
+            return False
+
+        key, text, modifiers = shortcut
+        return self._send_native_key(key, text, modifiers)
+
     def _click_selector(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
         selector = str(payload.get("selector") or "")
         script = f"""
@@ -532,6 +790,66 @@ class BrowserController:
 }})();
 """
         self._run_js(script, respond)
+
+    def _media_status(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
+        script = (
+            "(() => {\n"
+            + MEDIA_CONTROL_HELPERS
+            + """
+  const media = remoteExplorerFindMedia();
+  return remoteExplorerMediaStatus(media);
+})();
+"""
+        )
+        self._run_js(script, respond)
+
+    def _media_control(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
+        action = str(payload.get("action") or "")
+        if action not in {
+            "play_pause",
+            "fullscreen",
+            "volume_up",
+            "volume_down",
+            "mute",
+            "seek_forward",
+            "seek_back",
+            "next",
+            "previous",
+        }:
+            respond(_error("unsupported_media_action", f"Unsupported media action: {action}"))
+            return
+
+        amount = float(payload.get("amount", 0) or 0)
+        script = (
+            "(() => {\n"
+            + MEDIA_CONTROL_HELPERS
+            + f"""
+  const action = {json.dumps(action)};
+  const amount = Number({json.dumps(amount)}) || 0;
+  const media = remoteExplorerFindMedia();
+  if (!media) return {{ media_found: false, controlled: false, media_action: action, media_reason: "no_media" }};
+  return remoteExplorerRunMediaAction(media, action, amount);
+}})();
+"""
+        )
+
+        def apply_shortcut_fallback(value: Any) -> Any:
+            if not isinstance(value, dict):
+                return value
+
+            needs_shortcut = action == "fullscreen" or (
+                action in {"next", "previous"} and not bool(value.get("controlled"))
+            )
+            if not needs_shortcut:
+                return value
+
+            if self._send_media_shortcut(action):
+                value["controlled"] = True
+                value["media_reason"] = "keyboard_shortcut"
+                value["media_action"] = action
+            return value
+
+        self._run_js(script, respond, apply_shortcut_fallback)
 
     def _back(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
         self.view.back()

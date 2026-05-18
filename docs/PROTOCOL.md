@@ -46,7 +46,7 @@ Servers reply directly to the sender and may also broadcast periodic announces:
     "name": "Living Room PC",
     "control_port": 45455,
     "auth": "password",
-    "capabilities": ["navigate", "click", "text", "scroll", "status"]
+    "capabilities": ["navigate", "click", "text", "scroll", "media_status", "media_control", "status"]
   }
 }
 ```
@@ -225,6 +225,34 @@ Initial supported keys: `Enter`, `Escape`, `Backspace`.
 ```json
 { "key": "Enter" }
 ```
+
+### `media_status`
+
+Automatically detects the current page media element, preferring a playing or
+large visible `video`/`audio` element.
+
+```json
+{}
+```
+
+Result fields include `media_found`, `media_paused`, `media_muted`,
+`media_volume`, `media_current_time`, `media_duration`, and
+`media_fullscreen`.
+
+### `media_control`
+
+Automatically detects the current page media element and applies a TV-remote
+style action.
+
+```json
+{ "action": "play_pause", "amount": 0 }
+```
+
+Supported actions: `play_pause`, `fullscreen`, `volume_up`, `volume_down`,
+`mute`, `seek_forward`, `seek_back`, `next`, and `previous`. `amount` is used
+for volume step and seek seconds. `next` and `previous` try to click matching
+page player controls and report `controlled: false` if the page has no
+detectable control.
 
 ### `close_page`
 

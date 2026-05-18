@@ -404,6 +404,26 @@ namespace RemoteExplorer
                 cancellationToken);
         }
 
+        public async Task<CommandEnvelope> MediaStatusAsync(CancellationToken cancellationToken = default)
+        {
+            return await SendCommandAsync("media_status", new Dictionary<string, object>(), cancellationToken);
+        }
+
+        public async Task<CommandEnvelope> MediaControlAsync(
+            string action,
+            float amount = 0f,
+            CancellationToken cancellationToken = default)
+        {
+            return await SendCommandAsync(
+                "media_control",
+                new Dictionary<string, object>
+                {
+                    ["action"] = action ?? string.Empty,
+                    ["amount"] = amount
+                },
+                cancellationToken);
+        }
+
         public async Task<CommandEnvelope> StartStreamAsync(
             string resolution = "360p",
             int fps = DefaultStreamFps,

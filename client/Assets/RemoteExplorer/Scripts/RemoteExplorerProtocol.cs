@@ -331,6 +331,18 @@ namespace RemoteExplorer
         public string id;
         public string text;
         public bool media_fullscreen_requested;
+        public bool media_found;
+        public bool controlled;
+        public string media_action;
+        public string media_reason;
+        public string media_tag;
+        public bool media_paused;
+        public bool media_muted;
+        public float media_volume;
+        public float media_current_time;
+        public float media_duration;
+        public bool media_fullscreen;
+        public string media_title;
     }
 
     [Serializable]

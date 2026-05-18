@@ -51,6 +51,16 @@ namespace RemoteExplorer
         private InputField remoteTextInput;
         private Button remoteInputDoneButton;
         private Button remoteInputCancelButton;
+        private Button mediaStatusButton;
+        private Button mediaPreviousButton;
+        private Button mediaSeekBackButton;
+        private Button mediaPlayPauseButton;
+        private Button mediaSeekForwardButton;
+        private Button mediaNextButton;
+        private Button mediaFullscreenButton;
+        private Button mediaVolumeDownButton;
+        private Button mediaMuteButton;
+        private Button mediaVolumeUpButton;
         private readonly Queue<RemoteKeyboardCommand> remoteKeyboardCommands = new Queue<RemoteKeyboardCommand>();
         private Dropdown streamModeDropdown;
         private Dropdown streamResolutionDropdown;
@@ -367,6 +377,20 @@ namespace RemoteExplorer
             reloadButton = CreateCompactButton(navRow.transform, "Reload", () => FireAndForget(() => SendSimpleCommandAsync("reload")), 126);
             CreateCompactButton(navRow.transform, "Status", () => FireAndForget(() => SendSimpleCommandAsync("status")), 118);
 
+            var mediaRow = CreateCompactRow(parent, "Remote Media Row", 50);
+            mediaPreviousButton = CreateCompactButton(mediaRow.transform, "Prev", () => FireAndForget(() => SendMediaCommandAsync("previous")), 104);
+            mediaSeekBackButton = CreateCompactButton(mediaRow.transform, "-10s", () => FireAndForget(() => SendMediaCommandAsync("seek_back", 10f)), 104);
+            mediaPlayPauseButton = CreateCompactButton(mediaRow.transform, "Play/Pause", () => FireAndForget(() => SendMediaCommandAsync("play_pause")), 170);
+            mediaSeekForwardButton = CreateCompactButton(mediaRow.transform, "+10s", () => FireAndForget(() => SendMediaCommandAsync("seek_forward", 10f)), 104);
+            mediaNextButton = CreateCompactButton(mediaRow.transform, "Next", () => FireAndForget(() => SendMediaCommandAsync("next")), 104);
+            mediaFullscreenButton = CreateCompactButton(mediaRow.transform, "Full", () => FireAndForget(() => SendMediaCommandAsync("fullscreen")), 104);
+
+            var volumeRow = CreateCompactRow(parent, "Remote Volume Row", 50);
+            mediaStatusButton = CreateCompactButton(volumeRow.transform, "Player", () => FireAndForget(SendMediaStatusAsync), 130);
+            mediaVolumeDownButton = CreateCompactButton(volumeRow.transform, "Vol-", () => FireAndForget(() => SendMediaCommandAsync("volume_down", 0.1f)), 118);
+            mediaMuteButton = CreateCompactButton(volumeRow.transform, "Mute", () => FireAndForget(() => SendMediaCommandAsync("mute")), 118);
+            mediaVolumeUpButton = CreateCompactButton(volumeRow.transform, "Vol+", () => FireAndForget(() => SendMediaCommandAsync("volume_up", 0.1f)), 118);
+
             remoteInputPanel = CreateCompactRow(parent, "Remote Input Row", 50);
             remoteTextInput = CreateInput(remoteInputPanel.transform, "Page input", 50, false);
             remoteTextInput.onEndEdit.AddListener(_ => RemoteInputEndEdit());
@@ -514,6 +538,128 @@ namespace RemoteExplorer
         {
             SetStatus("Sending " + command);
             await RunCommandAsync(() => client.BrowserCommandAsync(command, lifetime.Token), command + " ok");
+        }
+
+        private async Task SendMediaStatusAsync()
+        {
+            SetStatus("Detecting page player");
+            try
+            {
+                var result = await client.MediaStatusAsync(lifetime.Token);
+                if (result.ok || result.type == "result")
+                {
+                    SetStatus(DescribeMediaStatus(result.result));
+                    return;
+                }
+
+                var error = result.error != null ? $"{result.error.code}: {result.error.message}" : "Unknown error";
+                SetStatus("Player status failed: " + error);
+            }
+            catch (Exception ex)
+            {
+                SetStatus("Player status failed: " + ex.Message);
+            }
+        }
+
+        private async Task SendMediaCommandAsync(string action, float amount = 0f)
+        {
+            SetStatus("Media " + MediaActionLabel(action));
+            try
+            {
+                var result = await client.MediaControlAsync(action, amount, lifetime.Token);
+                if (result.ok || result.type == "result")
+                {
+                    SetStatus(DescribeMediaCommand(result.result, action));
+                    return;
+                }
+
+                var error = result.error != null ? $"{result.error.code}: {result.error.message}" : "Unknown error";
+                SetStatus("Media command failed: " + error);
+            }
+            catch (Exception ex)
+            {
+                SetStatus("Media command failed: " + ex.Message);
+            }
+        }
+
+        private static string DescribeMediaStatus(WebRtcAnswer media)
+        {
+            if (media == null || !media.media_found)
+            {
+                return "No page player found";
+            }
+
+            var state = media.media_paused ? "paused" : "playing";
+            var volume = Mathf.RoundToInt(Mathf.Clamp01(media.media_volume) * 100f);
+            var muted = media.media_muted ? ", muted" : string.Empty;
+            var fullscreen = media.media_fullscreen ? ", fullscreen" : string.Empty;
+            return $"Player {state}, {FormatMediaTime(media.media_current_time)}/{FormatMediaTime(media.media_duration)}, vol {volume}%{muted}{fullscreen}";
+        }
+
+        private static string DescribeMediaCommand(WebRtcAnswer media, string fallbackAction)
+        {
+            if (media == null)
+            {
+                return "Media command sent";
+            }
+
+            if (media.controlled && media.media_reason == "keyboard_shortcut")
+            {
+                return $"{MediaActionLabel(string.IsNullOrEmpty(media.media_action) ? fallbackAction : media.media_action)} shortcut sent";
+            }
+
+            if (!media.media_found)
+            {
+                return "No page player found";
+            }
+
+            if (!media.controlled)
+            {
+                var reason = string.IsNullOrEmpty(media.media_reason) ? "not handled by this page" : media.media_reason;
+                return $"{MediaActionLabel(fallbackAction)} unavailable: {reason}";
+            }
+
+            return $"{MediaActionLabel(string.IsNullOrEmpty(media.media_action) ? fallbackAction : media.media_action)} ok, {DescribeMediaStatus(media)}";
+        }
+
+        private static string MediaActionLabel(string action)
+        {
+            switch (action)
+            {
+                case "play_pause":
+                    return "Play/Pause";
+                case "fullscreen":
+                    return "Fullscreen";
+                case "volume_up":
+                    return "Volume up";
+                case "volume_down":
+                    return "Volume down";
+                case "mute":
+                    return "Mute";
+                case "seek_forward":
+                    return "Seek forward";
+                case "seek_back":
+                    return "Seek back";
+                case "next":
+                    return "Next";
+                case "previous":
+                    return "Previous";
+                default:
+                    return string.IsNullOrEmpty(action) ? "command" : action;
+            }
+        }
+
+        private static string FormatMediaTime(float seconds)
+        {
+            if (seconds <= 0f || float.IsNaN(seconds) || float.IsInfinity(seconds))
+            {
+                return "0:00";
+            }
+
+            var totalSeconds = Mathf.RoundToInt(seconds);
+            var minutes = totalSeconds / 60;
+            var remainder = totalSeconds % 60;
+            return $"{minutes}:{remainder:00}";
         }
 
         private async Task ToggleStreamAsync()
@@ -1384,6 +1530,16 @@ namespace RemoteExplorer
             SetButtonInteractable(streamToggleButton, enabled);
             SetButtonInteractable(remoteInputDoneButton, enabled);
             SetButtonInteractable(remoteInputCancelButton, enabled);
+            SetButtonInteractable(mediaStatusButton, enabled);
+            SetButtonInteractable(mediaPreviousButton, enabled);
+            SetButtonInteractable(mediaSeekBackButton, enabled);
+            SetButtonInteractable(mediaPlayPauseButton, enabled);
+            SetButtonInteractable(mediaSeekForwardButton, enabled);
+            SetButtonInteractable(mediaNextButton, enabled);
+            SetButtonInteractable(mediaFullscreenButton, enabled);
+            SetButtonInteractable(mediaVolumeDownButton, enabled);
+            SetButtonInteractable(mediaMuteButton, enabled);
+            SetButtonInteractable(mediaVolumeUpButton, enabled);
         }
 
         private void SetStatus(string message)

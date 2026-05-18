@@ -67,6 +67,8 @@ Implemented client features:
 - Tap preview to click the remote webpage. Swipe the preview to scroll the page.
 - Tapping a webpage input opens the Unity-side input field and writes the text
   back to the focused remote element.
+- The client can auto-detect the current page player and expose TV-remote
+  controls for play/pause, fullscreen, volume, seeking, next, and previous.
 - Video fullscreen is handled by the server browser while the active client
   preview stream keeps running, so remote control can continue after exiting
   fullscreen.
