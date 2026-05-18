@@ -369,6 +369,40 @@ MEDIA_CONTROL_HELPERS = r"""
 LOGGER = logging.getLogger("remote_explorer.browser")
 
 
+class PopupRedirectPage(QWebEnginePage):
+    def __init__(self, opener: QWebEnginePage) -> None:
+        super().__init__(opener.profile(), opener)
+        self.opener = opener
+
+    def acceptNavigationRequest(self, url: QUrl, navigation_type: Any, is_main_frame: bool) -> bool:
+        if is_main_frame and url.isValid() and not url.isEmpty() and url.toString() != "about:blank":
+            LOGGER.info("Redirecting popup/new-tab navigation into current page: %s", url.toString())
+            QTimer.singleShot(0, lambda target=QUrl(url): self._redirect_to_opener(target))
+            return False
+
+        return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
+
+    def _redirect_to_opener(self, url: QUrl) -> None:
+        self.opener.setUrl(url)
+        self.deleteLater()
+
+
+class SinglePageWebEnginePage(QWebEnginePage):
+    def __init__(self, profile: QWebEngineProfile, parent: Any = None) -> None:
+        super().__init__(profile, parent)
+        self._popup_pages: list[PopupRedirectPage] = []
+
+    def createWindow(self, window_type: Any) -> QWebEnginePage:
+        popup = PopupRedirectPage(self)
+        self._popup_pages.append(popup)
+        popup.destroyed.connect(lambda _=None, page=popup: self._forget_popup(page))
+        return popup
+
+    def _forget_popup(self, page: PopupRedirectPage) -> None:
+        if page in self._popup_pages:
+            self._popup_pages.remove(page)
+
+
 class BrowserWindow(QMainWindow):
     def __init__(self, config: ServerConfig) -> None:
         super().__init__()
@@ -388,7 +422,7 @@ class BrowserWindow(QMainWindow):
         self.profile.settings().setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
 
         self.view = QWebEngineView(self)
-        self.page = QWebEnginePage(self.profile, self)
+        self.page = SinglePageWebEnginePage(self.profile, self)
         self.page.settings().setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
         self.view.setPage(self.page)
         self.setCentralWidget(self.view)
