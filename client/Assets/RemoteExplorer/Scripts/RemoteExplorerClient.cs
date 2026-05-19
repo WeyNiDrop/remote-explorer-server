@@ -424,6 +424,19 @@ namespace RemoteExplorer
                 cancellationToken);
         }
 
+        public async Task<CommandEnvelope> ClearRemoteCacheAsync(
+            bool clearCookies,
+            CancellationToken cancellationToken = default)
+        {
+            return await SendCommandAsync(
+                "clear_cache",
+                new Dictionary<string, object>
+                {
+                    ["clear_cookies"] = clearCookies
+                },
+                cancellationToken);
+        }
+
         public async Task<CommandEnvelope> StartStreamAsync(
             string resolution = "360p",
             int fps = DefaultStreamFps,

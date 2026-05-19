@@ -14,7 +14,7 @@ namespace RemoteExplorer
     {
         public const int Version = 1;
         public const int DefaultDiscoveryPort = 45454;
-        public const int DefaultControlPort = 45455;
+        public const int DefaultControlPort = 45454;
         public const int Pbkdf2Iterations = 100000;
 
         public static string NewRequestId()
@@ -379,6 +379,11 @@ namespace RemoteExplorer
         private const string KeyServerHost = "RemoteExplorer.ServerHost";
         private const string KeyServerPort = "RemoteExplorer.ServerPort";
         private const string KeyStreamMode = "RemoteExplorer.StreamMode";
+        private const string KeyServers = "RemoteExplorer.Servers";
+        private const string KeyDefaultUrl = "RemoteExplorer.DefaultUrl";
+        private const string KeyFavorites = "RemoteExplorer.Favorites";
+        private const string KeyStreamResolution = "RemoteExplorer.StreamResolution";
+        private const string KeyStreamFps = "RemoteExplorer.StreamFps";
 
         public string Password;
         public bool AutoConnect;
@@ -386,18 +391,55 @@ namespace RemoteExplorer
         public string ServerHost;
         public int ServerPort = RemoteExplorerProtocol.DefaultControlPort;
         public string StreamMode = "webrtc";
+        public string DefaultUrl = "https://www.youtube.com";
+        public string StreamResolution = "720p";
+        public int StreamFps = RemoteExplorerClient.DefaultStreamFps;
+        public List<RemoteExplorerSavedServer> Servers = new List<RemoteExplorerSavedServer>();
+        public List<RemoteExplorerFavoriteSite> Favorites = new List<RemoteExplorerFavoriteSite>();
 
         public static RemoteExplorerSettings Load()
         {
-            return new RemoteExplorerSettings
+            var settings = new RemoteExplorerSettings
             {
                 Password = PlayerPrefs.GetString(KeyPassword, string.Empty),
                 AutoConnect = PlayerPrefs.GetInt(KeyAutoConnect, 0) == 1,
                 ServerId = PlayerPrefs.GetString(KeyServerId, string.Empty),
                 ServerHost = PlayerPrefs.GetString(KeyServerHost, string.Empty),
                 ServerPort = PlayerPrefs.GetInt(KeyServerPort, RemoteExplorerProtocol.DefaultControlPort),
-                StreamMode = PlayerPrefs.GetString(KeyStreamMode, "webrtc")
+                StreamMode = PlayerPrefs.GetString(KeyStreamMode, "webrtc"),
+                DefaultUrl = PlayerPrefs.GetString(KeyDefaultUrl, "https://www.youtube.com"),
+                StreamResolution = PlayerPrefs.GetString(KeyStreamResolution, "720p"),
+                StreamFps = PlayerPrefs.GetInt(KeyStreamFps, RemoteExplorerClient.DefaultStreamFps)
             };
+
+            settings.Servers = LoadServers(KeyServers);
+            settings.Favorites = LoadFavorites(KeyFavorites);
+            if (settings.Favorites.Count == 0)
+            {
+                settings.Favorites.AddRange(DefaultFavorites());
+            }
+
+            if (settings.Servers.Count == 0 && !string.IsNullOrEmpty(settings.ServerHost))
+            {
+                settings.Servers.Add(new RemoteExplorerSavedServer
+                {
+                    Id = string.IsNullOrEmpty(settings.ServerId)
+                        ? "saved:" + settings.ServerHost + ":" + settings.ServerPort
+                        : settings.ServerId,
+                    Name = "Saved server",
+                    Host = settings.ServerHost,
+                    Port = settings.ServerPort > 0 ? settings.ServerPort : RemoteExplorerProtocol.DefaultControlPort,
+                    Password = settings.Password ?? string.Empty,
+                    SavePassword = !string.IsNullOrEmpty(settings.Password),
+                    IsDefault = settings.AutoConnect
+                });
+            }
+
+            settings.StreamFps = Mathf.Clamp(
+                settings.StreamFps,
+                RemoteExplorerClient.MinStreamFps,
+                RemoteExplorerClient.MaxStreamFps);
+            return settings;
         }
 
         public void Save()
@@ -408,7 +450,96 @@ namespace RemoteExplorer
             PlayerPrefs.SetString(KeyServerHost, ServerHost ?? string.Empty);
             PlayerPrefs.SetInt(KeyServerPort, ServerPort);
             PlayerPrefs.SetString(KeyStreamMode, string.IsNullOrEmpty(StreamMode) ? "webrtc" : StreamMode);
+            PlayerPrefs.SetString(KeyDefaultUrl, string.IsNullOrEmpty(DefaultUrl) ? "https://www.youtube.com" : DefaultUrl);
+            PlayerPrefs.SetString(KeyStreamResolution, string.IsNullOrEmpty(StreamResolution) ? "720p" : StreamResolution);
+            PlayerPrefs.SetInt(
+                KeyStreamFps,
+                Mathf.Clamp(StreamFps, RemoteExplorerClient.MinStreamFps, RemoteExplorerClient.MaxStreamFps));
+            PlayerPrefs.SetString(KeyServers, JsonUtility.ToJson(new RemoteExplorerSavedServerList { Items = Servers }));
+            PlayerPrefs.SetString(KeyFavorites, JsonUtility.ToJson(new RemoteExplorerFavoriteSiteList { Items = Favorites }));
             PlayerPrefs.Save();
         }
+
+        public static List<RemoteExplorerFavoriteSite> DefaultFavorites()
+        {
+            return new List<RemoteExplorerFavoriteSite>
+            {
+                new RemoteExplorerFavoriteSite { Name = "YouTube", Url = "https://www.youtube.com" },
+                new RemoteExplorerFavoriteSite { Name = "Bilibili", Url = "https://www.bilibili.com" },
+                new RemoteExplorerFavoriteSite { Name = "Douyin", Url = "https://www.douyin.com" },
+                new RemoteExplorerFavoriteSite { Name = "TikTok", Url = "https://www.tiktok.com" },
+                new RemoteExplorerFavoriteSite { Name = "芒果TV", Url = "https://www.mgtv.com" },
+                new RemoteExplorerFavoriteSite { Name = "爱奇艺", Url = "https://www.iqiyi.com" }
+            };
+        }
+
+        private static List<RemoteExplorerSavedServer> LoadServers(string key)
+        {
+            var json = PlayerPrefs.GetString(key, string.Empty);
+            if (string.IsNullOrEmpty(json))
+            {
+                return new List<RemoteExplorerSavedServer>();
+            }
+
+            try
+            {
+                var list = JsonUtility.FromJson<RemoteExplorerSavedServerList>(json);
+                return list != null && list.Items != null ? list.Items : new List<RemoteExplorerSavedServer>();
+            }
+            catch
+            {
+                return new List<RemoteExplorerSavedServer>();
+            }
+        }
+
+        private static List<RemoteExplorerFavoriteSite> LoadFavorites(string key)
+        {
+            var json = PlayerPrefs.GetString(key, string.Empty);
+            if (string.IsNullOrEmpty(json))
+            {
+                return new List<RemoteExplorerFavoriteSite>();
+            }
+
+            try
+            {
+                var list = JsonUtility.FromJson<RemoteExplorerFavoriteSiteList>(json);
+                return list != null && list.Items != null ? list.Items : new List<RemoteExplorerFavoriteSite>();
+            }
+            catch
+            {
+                return new List<RemoteExplorerFavoriteSite>();
+            }
+        }
+    }
+
+    [Serializable]
+    public class RemoteExplorerSavedServerList
+    {
+        public List<RemoteExplorerSavedServer> Items = new List<RemoteExplorerSavedServer>();
+    }
+
+    [Serializable]
+    public class RemoteExplorerFavoriteSiteList
+    {
+        public List<RemoteExplorerFavoriteSite> Items = new List<RemoteExplorerFavoriteSite>();
+    }
+
+    [Serializable]
+    public class RemoteExplorerSavedServer
+    {
+        public string Id;
+        public string Name;
+        public string Host;
+        public int Port = RemoteExplorerProtocol.DefaultControlPort;
+        public string Password;
+        public bool SavePassword;
+        public bool IsDefault;
+    }
+
+    [Serializable]
+    public class RemoteExplorerFavoriteSite
+    {
+        public string Name;
+        public string Url;
     }
 }
