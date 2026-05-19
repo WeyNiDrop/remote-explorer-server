@@ -27,6 +27,7 @@ namespace RemoteExplorer
         private const float StreamWatchdogSeconds = 12f;
         private const float StreamRestartCooldownSeconds = 12f;
         private const float StreamRenderLogIntervalSeconds = 5f;
+        private const int StreamStatusLogLimit = 80;
 
         private readonly RemoteExplorerClient client = new RemoteExplorerClient();
         private readonly List<DiscoveredServer> servers = new List<DiscoveredServer>();
@@ -86,6 +87,7 @@ namespace RemoteExplorer
         private Slider streamFpsSlider;
         private Text streamFpsText;
         private Button streamToggleButton;
+        private Button streamLogButton;
         private GameObject streamPreviewPanel;
         private GameObject streamFullscreenOverlay;
         private GameObject streamFullscreenHost;
@@ -93,11 +95,12 @@ namespace RemoteExplorer
         private int streamImageOriginalSiblingIndex;
         private bool streamPreviewFullscreen;
         private RawImage streamImage;
-        private Text streamStatusText;
         private GameObject serverRowsContainer;
         private GameObject favoritesModal;
         private GameObject streamSettingsModal;
         private GameObject clearCacheModal;
+        private GameObject streamLogModal;
+        private Text streamLogText;
         private Transform favoriteButtonsContainer;
         private Transform resolutionButtonsContainer;
         private Toggle clearCookiesToggle;
@@ -140,6 +143,7 @@ namespace RemoteExplorer
         private string selectedFavoriteUrl = string.Empty;
         private readonly List<Button> serverRowButtons = new List<Button>();
         private readonly List<Button> resolutionButtons = new List<Button>();
+        private readonly List<string> streamStatusLog = new List<string>();
 
         private struct RemoteKeyboardCommand
         {
@@ -482,6 +486,7 @@ namespace RemoteExplorer
             favoritesModal = BuildFavoritesModal(overlayLayer.transform);
             streamSettingsModal = BuildStreamSettingsModal(overlayLayer.transform);
             clearCacheModal = BuildClearCacheModal(overlayLayer.transform);
+            streamLogModal = BuildStreamLogModal(overlayLayer.transform);
             streamFullscreenOverlay = BuildStreamFullscreenOverlay(overlayLayer.transform);
 
             streamModeDropdown = CreateDropdown(overlayLayer.transform);
@@ -706,7 +711,40 @@ namespace RemoteExplorer
             return modal;
         }
 
-private GameObject BuildStreamFullscreenOverlay(Transform parent)
+        private GameObject BuildStreamLogModal(Transform parent)
+        {
+            var modal = CreateModal(parent, "Modal Stream Log", new Vector2(560, 420), new Vector2(0, -10));
+            AddModalCloseButton(modal, ToggleStreamLogModal);
+            var layout = modal.AddComponent<VerticalLayoutGroup>();
+            layout.padding = new RectOffset(28, 28, 22, 24);
+            layout.spacing = 14;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
+            CreateCardTitle(modal.transform, "串流日志", 34);
+
+            var logPanel = CreateCard(modal.transform, "Stream Log Body", Theme.Background, 14);
+            var logPanelElement = logPanel.AddComponent<LayoutElement>();
+            logPanelElement.preferredHeight = 260;
+            logPanelElement.flexibleHeight = 1;
+            streamLogText = CreateText(logPanel.transform, "暂无串流日志", 12, FontStyle.Normal, TextAnchor.UpperLeft, 0);
+            streamLogText.color = Theme.MutedText;
+            streamLogText.verticalOverflow = VerticalWrapMode.Truncate;
+            Stretch(streamLogText.rectTransform, 14, 14, 12, 12);
+
+            var buttonRow = CreateCompactRow(modal.transform, "Stream Log Buttons", 44);
+            var rowLayout = buttonRow.GetComponent<HorizontalLayoutGroup>();
+            rowLayout.childAlignment = TextAnchor.MiddleRight;
+            var spacer = CreateUiObject("Stream Log Spacer", buttonRow.transform);
+            spacer.AddComponent<LayoutElement>().flexibleWidth = 1;
+            CreateSecondaryButton(buttonRow.transform, "清空", ClearStreamLog, 82);
+            CreatePrimaryButton(buttonRow.transform, "关闭", ToggleStreamLogModal, 82);
+            modal.SetActive(false);
+            return modal;
+        }
+
+        private GameObject BuildStreamFullscreenOverlay(Transform parent)
         {
             var overlay = CreatePanel(parent, "Stream Fullscreen Overlay", new Color(0f, 0f, 0f, 0.96f));
             overlay.AddComponent<LayoutElement>().ignoreLayout = true;
@@ -1180,6 +1218,7 @@ private GameObject BuildStreamFullscreenOverlay(Transform parent)
             favoritesModal.SetActive(!favoritesModal.activeSelf);
             HideModal(streamSettingsModal);
             HideModal(clearCacheModal);
+            HideModal(streamLogModal);
         }
 
         private void ToggleStreamSettingsModal()
@@ -1193,6 +1232,7 @@ private GameObject BuildStreamFullscreenOverlay(Transform parent)
             streamSettingsModal.SetActive(!streamSettingsModal.activeSelf);
             HideModal(favoritesModal);
             HideModal(clearCacheModal);
+            HideModal(streamLogModal);
         }
 
         private void ToggleClearCacheModal()
@@ -1205,6 +1245,27 @@ private GameObject BuildStreamFullscreenOverlay(Transform parent)
             clearCacheModal.SetActive(!clearCacheModal.activeSelf);
             HideModal(favoritesModal);
             HideModal(streamSettingsModal);
+            HideModal(streamLogModal);
+        }
+
+        private void ToggleStreamLogModal()
+        {
+            if (streamLogModal == null)
+            {
+                return;
+            }
+
+            UpdateStreamLogText();
+            streamLogModal.SetActive(!streamLogModal.activeSelf);
+            HideModal(favoritesModal);
+            HideModal(streamSettingsModal);
+            HideModal(clearCacheModal);
+        }
+
+        private void ClearStreamLog()
+        {
+            streamStatusLog.Clear();
+            UpdateStreamLogText();
         }
 
         private void ConfirmClearCacheClicked()
@@ -2630,6 +2691,7 @@ private void RebuildServerDropdown()
             SetButtonInteractable(settingsButton, true);
             SetButtonInteractable(exitButton, enabled);
             SetButtonInteractable(streamFullscreenButton, enabled);
+            SetButtonInteractable(streamLogButton, true);
             SetButtonInteractable(confirmClearCacheButton, enabled);
             SetButtonInteractable(backButton, enabled);
             SetButtonInteractable(forwardButton, enabled);
@@ -2666,10 +2728,7 @@ private void RebuildServerDropdown()
 
         private void SetStreamStatus(string message)
         {
-            if (streamStatusText != null)
-            {
-                streamStatusText.text = message;
-            }
+            AppendStreamStatusLog(message);
 
             if (streamBadgeText != null)
             {
@@ -2689,16 +2748,42 @@ private void RebuildServerDropdown()
             }
         }
 
+        private void AppendStreamStatusLog(string message)
+        {
+            if (string.IsNullOrEmpty(message))
+            {
+                return;
+            }
+
+            streamStatusLog.Add(DateTime.Now.ToString("HH:mm:ss") + "  " + message);
+            while (streamStatusLog.Count > StreamStatusLogLimit)
+            {
+                streamStatusLog.RemoveAt(0);
+            }
+
+            if (streamLogModal != null && streamLogModal.activeSelf)
+            {
+                UpdateStreamLogText();
+            }
+        }
+
+        private void UpdateStreamLogText()
+        {
+            if (streamLogText == null)
+            {
+                return;
+            }
+
+            streamLogText.text = streamStatusLog.Count == 0
+                ? "暂无串流日志"
+                : string.Join("\n", streamStatusLog);
+        }
+
         private void ApplyStreamFrame(RemoteStreamFrame frame)
         {
             if (streamImage == null || frame == null || frame.JpegData == null || frame.JpegData.Length == 0)
             {
                 return;
-            }
-
-            if (streamStatusText != null)
-            {
-                streamStatusText.text = string.Empty;
             }
 
             if (streamTexture == null)
@@ -3568,16 +3653,13 @@ private void RebuildServerDropdown()
             streamImage.raycastTarget = true;
             streamImage.uvRect = new Rect(0f, 0f, 1f, 1f);
 
-            streamStatusText = CreateText(viewport.transform, "可全屏 / 退出全屏，可打开或关闭串流", 14, FontStyle.Normal, TextAnchor.MiddleCenter, 0);
-            streamStatusText.color = Theme.MutedText;
-            Anchor(streamStatusText.rectTransform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(420, 28));
-
             var actionRow = CreateCompactRow(previewPanel.transform, "Stream Action Row", 44);
             var actionLayout = actionRow.GetComponent<HorizontalLayoutGroup>();
             actionLayout.spacing = 12;
             actionLayout.childAlignment = TextAnchor.MiddleRight;
             var spacer = CreateUiObject("Stream Action Spacer", actionRow.transform);
             spacer.AddComponent<LayoutElement>().flexibleWidth = 1;
+            streamLogButton = CreateSecondaryButton(actionRow.transform, "日志", ToggleStreamLogModal, 76);
             streamToggleButton = CreateSecondaryButton(actionRow.transform, "打开串流", () => FireAndForget(ToggleStreamAsync), 112);
             streamFullscreenButton = CreatePrimaryButton(actionRow.transform, "全屏展示", ToggleStreamPreviewFullscreen, 112);
 
