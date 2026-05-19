@@ -6,6 +6,15 @@ from typing import Any
 
 PROTOCOL_VERSION = 1
 MAX_RECOMMENDED_DATAGRAM_BYTES = 1200
+SERVER_RESPONSE_MESSAGE_TYPES = frozenset(
+    {
+        "offer",
+        "auth_ok",
+        "auth_challenge",
+        "result",
+        "error",
+    }
+)
 
 
 class ProtocolError(ValueError):
@@ -43,6 +52,10 @@ def decode_datagram(data: bytes) -> dict[str, Any]:
         raise ProtocolError("Message type is required")
 
     return message
+
+
+def is_server_response_message_type(message_type: object) -> bool:
+    return message_type in SERVER_RESPONSE_MESSAGE_TYPES
 
 
 def result_message(request_id: str | None, result: dict[str, Any] | None = None) -> dict[str, Any]:

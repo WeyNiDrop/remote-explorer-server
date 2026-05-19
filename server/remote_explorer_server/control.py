@@ -7,7 +7,13 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtNetwork import QHostAddress, QUdpSocket
 
 from .config import ServerConfig
-from .protocol import decode_datagram, encode_message, error_message, result_message
+from .protocol import (
+    decode_datagram,
+    encode_message,
+    error_message,
+    is_server_response_message_type,
+    result_message,
+)
 from .security import AuthError, AuthManager
 
 BrowserResponder = Callable[[dict[str, Any]], None]
@@ -63,6 +69,11 @@ class ControlService(QObject):
     def _handle_message(self, message: dict[str, Any], host: QHostAddress, port: int) -> None:
         message_type = message.get("type")
         request_id = message.get("request_id")
+
+        if is_server_response_message_type(message_type):
+            # Response/announcement datagrams can be observed on shared UDP ports.
+            # Never answer them with another error, or two peers can bounce errors forever.
+            return
 
         if message_type == "discover" and self.handle_discovery:
             self._send_offer(host, port, request_id)
