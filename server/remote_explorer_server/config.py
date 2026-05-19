@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import platform
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
 
 DEFAULT_DISCOVERY_PORT = 45454
-DEFAULT_CONTROL_PORT = 45455
+DEFAULT_CONTROL_PORT = 45454
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,37 @@ def default_data_dir() -> Path:
     if app_data:
         return Path(app_data) / "RemoteExplorer"
     return Path.home() / ".remote-explorer"
+
+
+def server_settings_path(data_dir: Path | None = None) -> Path:
+    return (data_dir or default_data_dir()) / "server_settings.json"
+
+
+def load_server_settings(data_dir: Path | None = None) -> dict[str, object]:
+    path = server_settings_path(data_dir)
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def save_server_settings(config: ServerConfig) -> Path:
+    path = server_settings_path(config.data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "name": config.name,
+        "discovery_port": config.discovery_port,
+        "control_port": config.control_port,
+        "password": config.password or "",
+        "start_url": config.start_url,
+        "browser_engine": config.browser_engine,
+        "browser_executable": config.browser_executable or "",
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
 
 
 def load_or_create_server_id(config: ServerConfig) -> str:

@@ -61,8 +61,6 @@ class ChromiumBrowserWindow(QMainWindow):
         self.address_bar = QLineEdit(self)
         self.address_bar.setText(normalize_url(config.start_url))
         self.address_bar.returnPressed.connect(self._navigate_from_bar)
-        self._build_toolbar()
-        self._build_body()
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Chromium Browser", self)
@@ -290,6 +288,7 @@ class ChromiumBrowserService:
     def send_key_shortcut(self, action: str) -> bool:
         shortcuts = {
             "fullscreen": ("f", "KeyF", 70, 0),
+            "exit_fullscreen": ("Escape", "Escape", 27, 0),
             "next": ("N", "KeyN", 78, 8),
             "previous": ("P", "KeyP", 80, 8),
         }
@@ -623,6 +622,7 @@ class ChromiumBrowserController:
         "forward",
         "reload",
         "status",
+        "clear_cache",
         "stream_start",
         "stream_stop",
         "stream_config",
@@ -650,6 +650,7 @@ class ChromiumBrowserController:
             "forward": self._forward,
             "reload": self._reload,
             "status": self._status,
+            "clear_cache": self._clear_cache,
             "stream_start": self._stream_start,
             "stream_stop": self._stream_stop,
             "stream_config": self._stream_config,
@@ -757,7 +758,7 @@ class ChromiumBrowserController:
     def _media_control(self, payload: dict[str, Any], respond: Any) -> None:
         action = str(payload.get("action") or "")
         amount = float(payload.get("amount", 0) or 0)
-        if action not in {"play_pause", "fullscreen", "volume_up", "volume_down", "mute", "seek_forward", "seek_back", "next", "previous"}:
+        if action not in {"play_pause", "fullscreen", "exit_fullscreen", "volume_up", "volume_down", "mute", "seek_forward", "seek_back", "next", "previous"}:
             respond(_error("unsupported_media_action", f"Unsupported media action: {action}"))
             return
         value = self.browser.evaluate(
@@ -767,12 +768,20 @@ class ChromiumBrowserController:
 const action = {json_string(action)};
 const amount = Number({json_number(amount)}) || 0;
 const media = remoteExplorerFindMedia();
+if (!media && action === "exit_fullscreen") {{
+  return {{
+    media_found: false,
+    controlled: remoteExplorerExitFullscreen(),
+    media_action: action,
+    media_reason: "no_media"
+  }};
+}}
 if (!media) return {{ media_found: false, controlled: false, media_action: action, media_reason: "no_media" }};
 return remoteExplorerRunMediaAction(media, action, amount);
 }})()
 """
         )
-        if isinstance(value, dict) and (action == "fullscreen" or (action in {"next", "previous"} and not value.get("controlled"))):
+        if isinstance(value, dict) and (action in {"fullscreen", "exit_fullscreen"} or (action in {"next", "previous"} and not value.get("controlled"))):
             if self.browser.send_key_shortcut(action):
                 value["controlled"] = True
                 value["media_reason"] = "keyboard_shortcut"
@@ -793,6 +802,13 @@ return remoteExplorerRunMediaAction(media, action, amount);
 
     def _status(self, payload: dict[str, Any], respond: Any) -> None:
         respond(_ok(self.browser.status()))
+
+    def _clear_cache(self, payload: dict[str, Any], respond: Any) -> None:
+        clear_cookies = bool(payload.get("clear_cookies", False))
+        self.browser.connection.call("Network.clearBrowserCache")
+        if clear_cookies:
+            self.browser.connection.call("Network.clearBrowserCookies")
+        respond(_ok({"cache_cleared": True, "cookies_cleared": clear_cookies}))
 
     def _stream_start(self, payload: dict[str, Any], respond: Any) -> None:
         respond(_ok(self.stream_service.start(payload)))

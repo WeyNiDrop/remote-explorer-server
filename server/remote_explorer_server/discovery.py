@@ -23,6 +23,7 @@ CAPABILITIES = [
     "forward",
     "reload",
     "status",
+    "clear_cache",
     "stream_start",
     "stream_stop",
     "stream_config",

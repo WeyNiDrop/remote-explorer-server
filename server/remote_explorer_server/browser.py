@@ -343,6 +343,9 @@ MEDIA_CONTROL_HELPERS = r"""
     } else if (action === "fullscreen") {
       controlled = remoteExplorerClickButton(remoteExplorerFindButton(media, [["fullscreen"], ["full", "screen"]]));
       reason = controlled ? "" : "keyboard_shortcut_required";
+    } else if (action === "exit_fullscreen") {
+      controlled = remoteExplorerExitFullscreen();
+      reason = controlled ? "" : "keyboard_shortcut_required";
     } else if (action === "volume_up" || action === "volume_down") {
       const step = amount > 0 ? amount : 0.1;
       const delta = action === "volume_up" ? step : -step;
@@ -455,12 +458,12 @@ class BrowserWindow(QMainWindow):
         self.page = SinglePageWebEnginePage(self.profile, self)
         configure_web_engine_settings(self.page.settings())
         self.view.setPage(self.page)
-        self.setCentralWidget(self.view)
+        self.view.resize(1280, 800)
+        self.view.hide()
 
         self.address_bar = QLineEdit(self)
         self.address_bar.returnPressed.connect(self._navigate_from_bar)
         self.toolbar: QToolBar | None = None
-        self._build_toolbar()
 
         self.stream_service = BrowserStreamService(self.view, self)
         self.webrtc_service = BrowserWebRtcService(self.view, self)
@@ -472,7 +475,6 @@ class BrowserWindow(QMainWindow):
         )
         self.page.fullScreenRequested.connect(self._handle_fullscreen_request)
         self.view.urlChanged.connect(lambda url: self.address_bar.setText(url.toString()))
-        self.view.titleChanged.connect(lambda title: self.setWindowTitle(f"{title} - {config.name}"))
 
         self.view.setUrl(QUrl(normalize_url(config.start_url)))
 
@@ -534,6 +536,7 @@ class BrowserController:
             "forward": self._forward,
             "reload": self._reload,
             "status": self._status,
+            "clear_cache": self._clear_cache,
             "stream_start": self._stream_start,
             "stream_stop": self._stream_stop,
             "stream_config": self._stream_config,
@@ -738,6 +741,7 @@ class BrowserController:
     def _send_media_shortcut(self, action: str) -> bool:
         shortcuts: dict[str, tuple[Qt.Key, str, Qt.KeyboardModifier]] = {
             "fullscreen": (Qt.Key.Key_F, "f", Qt.KeyboardModifier.NoModifier),
+            "exit_fullscreen": (Qt.Key.Key_Escape, "", Qt.KeyboardModifier.NoModifier),
             "next": (Qt.Key.Key_N, "N", Qt.KeyboardModifier.ShiftModifier),
             "previous": (Qt.Key.Key_P, "P", Qt.KeyboardModifier.ShiftModifier),
         }
@@ -872,6 +876,7 @@ class BrowserController:
         if action not in {
             "play_pause",
             "fullscreen",
+            "exit_fullscreen",
             "volume_up",
             "volume_down",
             "mute",
@@ -891,6 +896,14 @@ class BrowserController:
   const action = {json.dumps(action)};
   const amount = Number({json.dumps(amount)}) || 0;
   const media = remoteExplorerFindMedia();
+  if (!media && action === "exit_fullscreen") {{
+    return {{
+      media_found: false,
+      controlled: remoteExplorerExitFullscreen(),
+      media_action: action,
+      media_reason: "no_media"
+    }};
+  }}
   if (!media) return {{ media_found: false, controlled: false, media_action: action, media_reason: "no_media" }};
   return remoteExplorerRunMediaAction(media, action, amount);
 }})();
@@ -901,7 +914,7 @@ class BrowserController:
             if not isinstance(value, dict):
                 return value
 
-            needs_shortcut = action == "fullscreen" or (
+            needs_shortcut = action in {"fullscreen", "exit_fullscreen"} or (
                 action in {"next", "previous"} and not bool(value.get("controlled"))
             )
             if not needs_shortcut:
@@ -943,6 +956,14 @@ class BrowserController:
                 }
             )
         )
+
+    def _clear_cache(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
+        clear_cookies = bool(payload.get("clear_cookies", False))
+        profile = self.view.page().profile()
+        profile.clearHttpCache()
+        if clear_cookies:
+            profile.cookieStore().deleteAllCookies()
+        respond(_ok({"cache_cleared": True, "cookies_cleared": clear_cookies}))
 
     def _stream_start(self, payload: dict[str, Any], respond: BrowserResponder) -> None:
         self._stop_webrtc_if_active()
