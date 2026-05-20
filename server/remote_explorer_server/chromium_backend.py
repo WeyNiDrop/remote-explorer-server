@@ -105,13 +105,27 @@ class ChromiumBrowserService:
         self.port = _free_port()
         self.profile_dir = config.data_dir / "chromium-profile"
         self.profile_dir.mkdir(parents=True, exist_ok=True)
-        self.process = self._launch_browser(config.start_url)
-        self.connection = self._connect()
+        self.browser_log_file = None
         self.viewport_width = 1280
         self.viewport_height = 720
         self._fullscreen_topmost = False
-        self._configure_page()
-        self.navigate(normalize_url(config.start_url))
+        try:
+            self.process = self._launch_browser(config.start_url)
+            self.connection = self._connect()
+            self._configure_page()
+            self.navigate(normalize_url(config.start_url))
+        except Exception as exc:
+            if hasattr(self, "process"):
+                self.close()
+            elif self.browser_log_file is not None:
+                try:
+                    self.browser_log_file.close()
+                except Exception:
+                    pass
+                self.browser_log_file = None
+            if isinstance(exc, ChromiumUnavailable):
+                raise
+            raise ChromiumUnavailable(f"Chromium startup failed: {exc}") from exc
 
     def close(self) -> None:
         self._set_fullscreen_topmost(False)
@@ -142,6 +156,12 @@ class ChromiumBrowserService:
             except subprocess.TimeoutExpired:
                 LOGGER.debug("Chromium did not exit after terminate; killing")
                 self.process.kill()
+        if self.browser_log_file is not None:
+            try:
+                self.browser_log_file.close()
+            except Exception:
+                pass
+            self.browser_log_file = None
 
     def navigate(self, url: str) -> dict[str, Any]:
         target = normalize_url(url)
@@ -413,7 +433,16 @@ class ChromiumBrowserService:
             normalize_url(start_url),
         ]
         LOGGER.info("Starting Chromium browser engine: %s", self.executable)
-        return subprocess.Popen(args)
+        log_path = self.config.data_dir / "logs" / "chromium.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.browser_log_file = log_path.open("ab", buffering=0)
+        self.browser_log_file.write(f"\n--- Chromium start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode("utf-8"))
+        return subprocess.Popen(
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=self.browser_log_file,
+            stderr=subprocess.STDOUT,
+        )
 
     def _connect(self) -> CdpConnection:
         deadline = time.time() + 12.0
@@ -427,7 +456,11 @@ class ChromiumBrowserService:
             except Exception as exc:
                 last_error = exc
             time.sleep(0.15)
-        raise ChromiumUnavailable(f"Chromium CDP endpoint did not become ready: {last_error}")
+        exit_code = self.process.poll()
+        detail = f"Chromium CDP endpoint did not become ready: {last_error}"
+        if exit_code is not None:
+            detail += f" (Chromium exited with code {exit_code})"
+        raise ChromiumUnavailable(detail)
 
     def _configure_page(self) -> None:
         for method in ("Page.enable", "Runtime.enable", "Network.enable"):

@@ -367,6 +367,14 @@ class ServerControlPanel(QWidget):
         self.client_label.setText(f"{name}\n{host}:{port}")
         self.client_note.setText("客户端已连接")
 
+    def set_startup_warning(self, message: str) -> None:
+        self.status_label.setText("浏览器不可用")
+        self.status_label.setProperty("pill", "warn")
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
+        self.client_label.setText("Chromium 启动失败")
+        self.client_note.setText(message)
+
     def open_settings(self) -> None:
         dialog = ServerSettingsDialog(self.config, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:

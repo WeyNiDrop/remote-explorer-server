@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication, QMainWindow
 
         from .chromium_backend import ChromiumBrowserWindow, ChromiumUnavailable, find_chromium_executable
         from .control import ControlService
@@ -113,7 +113,13 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv[:1])
     server_id = load_or_create_server_id(config)
     chrome_executable = find_chromium_executable(config.browser_executable)
-    window = create_browser_window(config, ChromiumBrowserWindow, ChromiumUnavailable)
+    browser_error = ""
+    try:
+        window = create_browser_window(config, ChromiumBrowserWindow, ChromiumUnavailable)
+    except ChromiumUnavailable as exc:
+        browser_error = str(exc)
+        logging.getLogger("remote_explorer.main").exception("Chromium browser engine failed to start")
+        window = create_browser_unavailable_window(config.name, browser_error, QMainWindow)
     auth_manager = AuthManager(config.password)
     capabilities = getattr(window.controller, "capabilities", None)
     discovery_on_control_port = config.discovery_port == config.control_port
@@ -148,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
     window.log_listener = log_listener
     window.server_control_panel = ServerControlPanel(config, log_path, chrome_executable, window)
     window.setCentralWidget(window.server_control_panel)
+    if browser_error:
+        window.server_control_panel.set_startup_warning(browser_error)
     control.client_changed.connect(window.server_control_panel.update_client)
     window.show()
 
@@ -170,6 +178,40 @@ def create_browser_window(
             logging.getLogger("remote_explorer.main").error("Chromium browser engine unavailable: %s", exc)
             raise
     raise chromium_unavailable_type(f"Unsupported browser engine: {config.browser_engine}")
+
+
+class BrowserUnavailableController:
+    capabilities = ["status"]
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def handle(self, command: str, payload: dict[str, object], respond: object) -> None:
+        del payload
+        result = {
+            "ok": False,
+            "error": {
+                "code": "browser_unavailable",
+                "message": self.message,
+            },
+        }
+        if command == "status":
+            result = {
+                "ok": True,
+                "result": {
+                    "engine": "chromium",
+                    "available": False,
+                    "error": self.message,
+                },
+            }
+        respond(result)  # type: ignore[operator]
+
+
+def create_browser_unavailable_window(name: str, message: str, window_type: type):
+    window = window_type()
+    window.setWindowTitle(f"{name} - Browser unavailable")
+    window.controller = BrowserUnavailableController(message)
+    return window
 
 
 if __name__ == "__main__":
