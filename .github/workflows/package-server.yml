@@ -58,7 +58,7 @@ jobs:
           cache: pip
 
       - name: Install package dependencies
-        run: python -m pip install -e ".[server,webrtc]" pyinstaller
+        run: python -m pip install -e ".[server]" pyinstaller
 
       - name: Build executable
         run: pyinstaller --clean --noconfirm main.spec

@@ -7,6 +7,7 @@ import logging.handlers
 import os
 import queue
 import sys
+from importlib import import_module
 from pathlib import Path
 
 from .config import (
@@ -96,7 +97,6 @@ def main(argv: list[str] | None = None) -> int:
         from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication
 
-        from .browser import BrowserWindow
         from .chromium_backend import ChromiumBrowserWindow, ChromiumUnavailable, find_chromium_executable
         from .control import ControlService
         from .discovery import DiscoveryService
@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv[:1])
     server_id = load_or_create_server_id(config)
     chrome_executable = find_chromium_executable(config.browser_executable)
-    window = create_browser_window(config, BrowserWindow, ChromiumBrowserWindow, ChromiumUnavailable)
+    window = create_browser_window(config, ChromiumBrowserWindow, ChromiumUnavailable)
     auth_manager = AuthManager(config.password)
     capabilities = getattr(window.controller, "capabilities", None)
     discovery_on_control_port = config.discovery_port == config.control_port
@@ -161,7 +161,6 @@ def main(argv: list[str] | None = None) -> int:
 
 def create_browser_window(
     config: ServerConfig,
-    qt_window_type: type,
     chromium_window_type: type,
     chromium_unavailable_type: type[Exception],
 ):
@@ -173,7 +172,8 @@ def create_browser_window(
                 "Chromium browser engine unavailable, falling back to Qt WebEngine: %s",
                 exc,
             )
-    return qt_window_type(config)
+    browser_module = import_module(".browser", __package__)
+    return browser_module.BrowserWindow(config)
 
 
 if __name__ == "__main__":

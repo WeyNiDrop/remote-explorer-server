@@ -10,7 +10,14 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'aiortc',
+        'av',
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtWebEngineWidgets',
+        'remote_explorer_server.browser',
+        'remote_explorer_server.webrtc',
+    ],
     noarchive=False,
     optimize=0,
 )

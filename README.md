@@ -26,19 +26,12 @@ pip install -e ".[server,dev]"
 python -m remote_explorer_server --password 123456
 ```
 
-The server uses a Chromium-family browser engine by default when Chrome, Edge,
-or Chromium is installed. This improves compatibility with mainstream HTML5
-video sites. To force a backend or point to a browser executable:
+The server uses a Chromium-family browser engine when Chrome, Edge, or Chromium
+is installed. This improves compatibility with mainstream HTML5 video sites. To
+point to a browser executable:
 
 ```powershell
 python -m remote_explorer_server --browser-engine chromium --browser-executable "C:\Program Files\Google\Chrome\Application\chrome.exe"
-python -m remote_explorer_server --browser-engine qt
-```
-
-For server-side WebRTC/H.264 support, install the optional WebRTC extra:
-
-```powershell
-pip install -e ".[server,webrtc,dev]"
 ```
 
 In another terminal:
@@ -62,13 +55,6 @@ Implemented client features:
 - Remote open/close page, back, forward, reload, and status commands.
 - UDP JPEG browser preview stream with 360p/540p/720p/1080p options.
 - Stream FPS defaults to 30 and can be configured from 20-60 in the client.
-- WebRTC/H.264 streaming is available when the Python server is installed with
-  the `webrtc` extra and the Unity WebRTC package resolves in the client
-  project. In the WebRTC branch, negotiation failure is reported directly and
-  does not fall back to UDP/JPEG.
-- When WebRTC is available, the client can choose `WebRTC/H.264` or `UDP/JPEG`.
-  Switching modes while a stream is running stops the old transport and starts
-  the newly selected one.
 - Stream diagnostics are logged every 5 seconds while active. Server logs go to
   the server console through an asynchronous logger. Unity client diagnostics
   are written to `remote-explorer-stream.log` under `Application.persistentDataPath`;
