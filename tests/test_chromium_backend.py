@@ -74,6 +74,7 @@ class ChromiumBrowserServiceTests(unittest.TestCase):
                     "find_chromium_executable",
                     return_value="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                 ),
+                patch.object(chromium_backend, "_free_port", return_value=9222),
                 patch.object(ChromiumBrowserService, "_launch_browser", launch_browser),
                 patch.object(ChromiumBrowserService, "_connect", side_effect=ChromiumUnavailable("CDP unavailable")),
             ):

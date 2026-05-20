@@ -111,6 +111,7 @@ class ChromiumBrowserService:
         self.browser_log_file = None
         self.viewport_width = 1280
         self.viewport_height = 720
+        self._stream_viewport: tuple[int, int] | None = None
         self._fullscreen_topmost = False
         try:
             self.process = self._launch_browser(config.start_url)
@@ -198,7 +199,33 @@ class ChromiumBrowserService:
         )
 
     def set_viewport(self, width: int, height: int) -> None:
-        self.ensure_minimum_viewport(width, height)
+        self.set_stream_viewport(width, height)
+
+    def set_stream_viewport(self, width: int, height: int) -> None:
+        viewport_width = max(1, int(width))
+        viewport_height = max(1, int(height))
+        self._stream_viewport = (viewport_width, viewport_height)
+        try:
+            current_width, current_height = self._refresh_viewport_size()
+        except Exception as exc:
+            LOGGER.debug("Could not refresh Chromium viewport for streaming: %s", exc)
+            current_width, current_height = self.viewport_width, self.viewport_height
+        LOGGER.info(
+            "Chromium stream target set size=%sx%s viewport=%sx%s",
+            viewport_width,
+            viewport_height,
+            current_width,
+            current_height,
+        )
+
+    def clear_stream_viewport(self) -> None:
+        if self._stream_viewport is None:
+            return
+        self._stream_viewport = None
+        try:
+            self._refresh_viewport_size()
+        except Exception as exc:
+            LOGGER.debug("Could not refresh Chromium viewport after stream stop: %s", exc)
 
     def ensure_minimum_viewport(self, width: int, height: int) -> None:
         minimum_width = max(1, int(width))
@@ -234,6 +261,8 @@ class ChromiumBrowserService:
             LOGGER.debug("Could not resize Chromium window: %s", exc)
 
     def note_capture_size(self, width: int, height: int) -> None:
+        if self._stream_viewport is not None:
+            return
         self.viewport_width = max(1, int(width))
         self.viewport_height = max(1, int(height))
 
@@ -252,24 +281,36 @@ class ChromiumBrowserService:
         return base64.b64decode(encoded)
 
     def _capture_jpeg_result(self, quality: int) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "format": "jpeg",
+            "quality": clamp_int(quality, MIN_JPEG_QUALITY, 90, DEFAULT_JPEG_QUALITY),
+            "fromSurface": True,
+            "captureBeyondViewport": False,
+        }
+        if self._stream_viewport is not None:
+            payload["clip"] = {
+                "x": 0,
+                "y": 0,
+                "width": max(1, int(self.viewport_width)),
+                "height": max(1, int(self.viewport_height)),
+                "scale": 1,
+            }
         return self.connection.call(
             "Page.captureScreenshot",
-            {
-                "format": "jpeg",
-                "quality": clamp_int(quality, MIN_JPEG_QUALITY, 90, DEFAULT_JPEG_QUALITY),
-                "fromSurface": True,
-                "captureBeyondViewport": False,
-            },
+            payload,
             timeout=10.0,
         )
 
     def _reconnect_page(self) -> None:
+        stream_viewport = self._stream_viewport
         try:
             self.connection.close()
         except Exception:
             pass
         self.connection = self._connect()
         self._configure_page()
+        if stream_viewport is not None:
+            self.set_stream_viewport(*stream_viewport)
 
     def evaluate(self, script: str) -> Any:
         result = self.connection.call(
@@ -578,7 +619,7 @@ class ChromiumStreamService(QObject):
         self.config = ChromiumStreamConfig(host, port, width, height, fps, quality, resolution)
         self.target_host = QHostAddress(host)
         self.target_address = host
-        self.browser.ensure_minimum_viewport(width, height)
+        self.browser.set_stream_viewport(width, height)
         self.timer.setInterval(max(1, round(1000 / fps)))
         LOGGER.info(
             "Chromium UDP stream start target=%s:%s resolution=%s size=%sx%s fps=%s requested_fps=%s quality=%s chunk_bytes=%s max_chunks=%s pace=%s/%ss",
@@ -604,6 +645,7 @@ class ChromiumStreamService(QObject):
         self.config = None
         self.target_host = None
         self.target_address = None
+        self.browser.clear_stream_viewport()
         return self.status()
 
     def configure(self, payload: dict[str, Any]) -> dict[str, Any]:
