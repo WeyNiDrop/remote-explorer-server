@@ -55,7 +55,7 @@ namespace RemoteExplorer
         private const int StreamChunkBytes = 1000;
         private const int MaxStreamChunks = 512;
         private const int StreamReceiveBufferBytes = 8 * 1024 * 1024;
-        private const int MaxReceiveBurstPackets = 256;
+        private const int MaxReceiveBurstPackets = 1024;
         private const int SioUdpConnectionReset = -1744830452;
         private const double StreamStatsIntervalSeconds = 5.0;
         private const float DefaultControlTimeoutSeconds = 3f;
@@ -908,14 +908,12 @@ namespace RemoteExplorer
 
                 if (MarkNewestObservedFrameId(frameId))
                 {
-                    // 新帧到达后清理旧半帧，不等待完整旧帧。 / Once a newer frame arrives, discard older partial frames.
-                    streamStatsPartialPruned += RemovePartialFramesOlderThan(frameId);
+                    // Keep recent partial frames; late UDP chunks can still complete them after newer frames arrive.
+                    PrunePartialFrames();
                 }
                 else if (IsBehindNewestObservedFrameId(frameId))
                 {
                     streamStatsBehindPackets++;
-                    LogStreamReceiveStats("interval");
-                    return;
                 }
 
                 if (IsObsoleteFrameId(frameId))
@@ -986,12 +984,11 @@ namespace RemoteExplorer
 
         private void PrunePartialFrames()
         {
-            var cutoff = DateTime.UtcNow.AddSeconds(-2);
+            var cutoff = DateTime.UtcNow.AddSeconds(-3);
             var stale = partialStreamFrames
                 .Where(pair =>
                     pair.Value.LastUpdatedUtc < cutoff ||
-                    IsObsoleteFrameId(pair.Key) ||
-                    IsBehindNewestObservedFrameId(pair.Key))
+                    IsObsoleteFrameId(pair.Key))
                 .Select(pair => pair.Key)
                 .ToList();
             foreach (var frameId in stale)
@@ -1000,11 +997,11 @@ namespace RemoteExplorer
             }
             streamStatsPartialPruned += stale.Count;
 
-            if (partialStreamFrames.Count > 10)
+            if (partialStreamFrames.Count > 24)
             {
                 var overflow = partialStreamFrames
                     .OrderByDescending(pair => pair.Value.LastUpdatedUtc)
-                    .Skip(10)
+                    .Skip(24)
                     .Select(pair => pair.Key)
                     .ToList();
                 foreach (var frameId in overflow)
@@ -1030,20 +1027,6 @@ namespace RemoteExplorer
         private bool IsBehindNewestObservedFrameId(uint frameId)
         {
             return hasNewestObservedFrameId && IsFrameIdNewer(newestObservedFrameId, frameId);
-        }
-
-        private int RemovePartialFramesOlderThan(uint frameId)
-        {
-            var stale = partialStreamFrames
-                .Where(pair => IsFrameIdNewer(frameId, pair.Key))
-                .Select(pair => pair.Key)
-                .ToList();
-            foreach (var staleFrameId in stale)
-            {
-                partialStreamFrames.Remove(staleFrameId);
-            }
-
-            return stale.Count;
         }
 
         private bool IsObsoleteFrameId(uint frameId)

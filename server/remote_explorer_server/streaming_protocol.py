@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+import sys
 from typing import Any
 
 
@@ -8,10 +9,11 @@ STREAM_MAGIC = b"REXPSTR1"
 STREAM_HEADER_FORMAT = "!8sIHHHHHH"
 STREAM_HEADER_SIZE = struct.calcsize(STREAM_HEADER_FORMAT)
 STREAM_CHUNK_BYTES = 1000
-MAX_STREAM_CHUNKS_PER_FRAME = 64
-STREAM_CHUNK_PACE_BATCH = 8
-STREAM_CHUNK_PACE_SECONDS = 0.0015
+MAX_STREAM_CHUNKS_PER_FRAME = 48 if sys.platform == "darwin" else 64
+STREAM_CHUNK_PACE_BATCH = 4 if sys.platform == "darwin" else 8
+STREAM_CHUNK_PACE_SECONDS = 0.003 if sys.platform == "darwin" else 0.0015
 DEFAULT_STREAM_FPS = 30
+DEFAULT_MACOS_UDP_STREAM_FPS = 15
 MIN_STREAM_FPS = 20
 MAX_STREAM_FPS = 60
 DEFAULT_JPEG_QUALITY = 55

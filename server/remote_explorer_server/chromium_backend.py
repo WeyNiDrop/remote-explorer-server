@@ -27,6 +27,7 @@ from .config import ServerConfig
 from .protocol import normalize_url
 from .streaming_protocol import (
     DEFAULT_JPEG_QUALITY,
+    DEFAULT_MACOS_UDP_STREAM_FPS,
     MAX_STREAM_CHUNKS_PER_FRAME,
     DEFAULT_STREAM_FPS,
     MAX_STREAM_FPS,
@@ -571,13 +572,29 @@ class ChromiumStreamService(QObject):
         if port <= 0 or port > 65535:
             raise ValueError("Valid stream port is required")
         width, height, resolution = resolve_size(payload)
-        fps = clamp_int(payload.get("fps"), MIN_STREAM_FPS, MAX_STREAM_FPS, DEFAULT_STREAM_FPS)
+        requested_fps = clamp_int(payload.get("fps"), MIN_STREAM_FPS, MAX_STREAM_FPS, DEFAULT_STREAM_FPS)
+        fps = min(requested_fps, DEFAULT_MACOS_UDP_STREAM_FPS) if sys.platform == "darwin" else requested_fps
         quality = clamp_int(payload.get("quality"), 30, 90, DEFAULT_JPEG_QUALITY)
         self.config = ChromiumStreamConfig(host, port, width, height, fps, quality, resolution)
         self.target_host = QHostAddress(host)
         self.target_address = host
         self.browser.ensure_minimum_viewport(width, height)
         self.timer.setInterval(max(1, round(1000 / fps)))
+        LOGGER.info(
+            "Chromium UDP stream start target=%s:%s resolution=%s size=%sx%s fps=%s requested_fps=%s quality=%s chunk_bytes=%s max_chunks=%s pace=%s/%ss",
+            host,
+            port,
+            resolution,
+            width,
+            height,
+            fps,
+            requested_fps,
+            quality,
+            STREAM_CHUNK_BYTES,
+            MAX_STREAM_CHUNKS_PER_FRAME,
+            STREAM_CHUNK_PACE_BATCH,
+            STREAM_CHUNK_PACE_SECONDS,
+        )
         self.timer.start()
         self._send_frame()
         return self.status()
@@ -701,8 +718,10 @@ class ChromiumStreamService(QObject):
             now = time.monotonic()
             if now - self.last_stats_at >= 5.0:
                 LOGGER.info(
-                    "Chromium UDP stream sent frames=%s last=%sx%s source=%sx%s/%sB/%s chunks",
+                    "Chromium UDP stream sent frames=%s target=%s:%s last=%sx%s source=%sx%s/%sB/%s chunks",
                     self.frames_sent,
+                    target_address,
+                    config.port,
                     frame_width,
                     frame_height,
                     source_width,

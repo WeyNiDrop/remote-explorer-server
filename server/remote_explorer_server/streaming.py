@@ -4,6 +4,7 @@ import math
 import logging
 import socket
 import struct
+import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -19,11 +20,12 @@ STREAM_MAGIC = b"REXPSTR1"
 STREAM_HEADER_FORMAT = "!8sIHHHHHH"
 STREAM_HEADER_SIZE = struct.calcsize(STREAM_HEADER_FORMAT)
 STREAM_CHUNK_BYTES = 1000
-MAX_STREAM_CHUNKS_PER_FRAME = 64
+MAX_STREAM_CHUNKS_PER_FRAME = 48 if sys.platform == "darwin" else 64
 # 大帧分片发送削峰，避免 UDP 突发压垮客户端缓冲。 / Pace large frame chunks to avoid UDP bursts.
-STREAM_CHUNK_PACE_BATCH = 8
-STREAM_CHUNK_PACE_SECONDS = 0.0015
+STREAM_CHUNK_PACE_BATCH = 4 if sys.platform == "darwin" else 8
+STREAM_CHUNK_PACE_SECONDS = 0.003 if sys.platform == "darwin" else 0.0015
 DEFAULT_STREAM_FPS = 30
+DEFAULT_MACOS_UDP_STREAM_FPS = 15
 MIN_STREAM_FPS = 20
 MAX_STREAM_FPS = 60
 DEFAULT_JPEG_QUALITY = 55
@@ -79,7 +81,8 @@ class BrowserStreamService(QObject):
             raise ValueError("Valid stream port is required")
 
         width, height, resolution = _resolve_size(payload)
-        fps = _clamp_int(payload.get("fps"), MIN_STREAM_FPS, MAX_STREAM_FPS, DEFAULT_STREAM_FPS)
+        requested_fps = _clamp_int(payload.get("fps"), MIN_STREAM_FPS, MAX_STREAM_FPS, DEFAULT_STREAM_FPS)
+        fps = min(requested_fps, DEFAULT_MACOS_UDP_STREAM_FPS) if sys.platform == "darwin" else requested_fps
         quality = _clamp_int(payload.get("quality"), 30, 90, DEFAULT_JPEG_QUALITY)
 
         self.config = StreamConfig(
@@ -96,14 +99,19 @@ class BrowserStreamService(QObject):
         self.timer.setInterval(max(1, round(1000 / fps)))
         self._reset_stats()
         LOGGER.info(
-            "UDP/JPEG stream start target=%s:%s resolution=%s size=%sx%s fps=%s quality=%s",
+            "UDP/JPEG stream start target=%s:%s resolution=%s size=%sx%s fps=%s requested_fps=%s quality=%s chunk_bytes=%s max_chunks=%s pace=%s/%ss",
             host,
             port,
             resolution,
             width,
             height,
             fps,
+            requested_fps,
             quality,
+            STREAM_CHUNK_BYTES,
+            MAX_STREAM_CHUNKS_PER_FRAME,
+            STREAM_CHUNK_PACE_BATCH,
+            STREAM_CHUNK_PACE_SECONDS,
         )
         self.timer.start()
         self._send_frame()
