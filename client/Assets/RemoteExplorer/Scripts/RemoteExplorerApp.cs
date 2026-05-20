@@ -1844,10 +1844,12 @@ namespace RemoteExplorer
             streamStartInFlight = true;
             try
             {
-                var mode = SelectedStreamMode();
+                var requestedMode = SelectedStreamMode();
+                var mode = ResolveStreamModeForConnectedServer(requestedMode);
                 var resolution = SelectedStreamResolution();
                 var fps = SelectedStreamFps();
-                RemoteExplorerDiagnostics.Info($"Stream start requested mode={StreamModeLabel(mode)} resolution={resolution} fps={fps}");
+                RemoteExplorerDiagnostics.Info(
+                    $"Stream start requested mode={StreamModeLabel(requestedMode)} effective={StreamModeLabel(mode)} resolution={resolution} fps={fps}");
                 // Stop the inactive transport first so both modes do not compete for server captures.
                 await StopInactiveStreamTransportsAsync(mode);
 
@@ -1870,9 +1872,8 @@ namespace RemoteExplorer
 #if REMOTE_EXPLORER_HAS_WEBRTC
             if (webRtcPlayback == null)
             {
-                SetStreamStatus("WebRTC playback component is not available");
-                SetStatus("WebRTC unavailable: playback component is missing");
-                SetButtonLabel(streamToggleButton, "打开串流");
+                RemoteExplorerDiagnostics.Info("WebRTC playback component is missing; falling back to UDP/JPEG.");
+                await StartUdpStreamAsync(resolution, fps);
                 return;
             }
 
@@ -1900,6 +1901,13 @@ namespace RemoteExplorer
                 var webRtcError = webRtcResult.error != null
                     ? $"{webRtcResult.error.code}: {webRtcResult.error.message}"
                     : "Unknown error";
+                if (IsWebRtcUnsupported(webRtcResult))
+                {
+                    RemoteExplorerDiagnostics.Info("WebRTC unsupported by server; falling back to UDP/JPEG: " + webRtcError);
+                    await StartUdpStreamAsync(resolution, fps);
+                    return;
+                }
+
                 SetStreamStatus("WebRTC failed: " + webRtcError);
                 SetStatus("WebRTC stream failed: " + webRtcError);
                 SetButtonLabel(streamToggleButton, "打开串流");
@@ -1920,6 +1928,17 @@ namespace RemoteExplorer
             SetStatus("WebRTC is not available in this client build");
             SetButtonLabel(streamToggleButton, "打开串流");
 #endif
+        }
+
+        private static bool IsWebRtcUnsupported(CommandEnvelope result)
+        {
+            if (result == null || result.error == null)
+            {
+                return false;
+            }
+
+            return string.Equals(result.error.code, "webrtc_unavailable", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(result.error.code, "unknown_command", StringComparison.OrdinalIgnoreCase);
         }
 
         private async Task StartUdpStreamAsync(string resolution, int fps)
@@ -2056,7 +2075,7 @@ namespace RemoteExplorer
 
             var resolution = SelectedStreamResolution();
             var fps = SelectedStreamFps();
-            var selectedMode = SelectedStreamMode();
+            var selectedMode = ResolveStreamModeForConnectedServer(SelectedStreamMode());
             var activeMode = ActiveStreamModeOrSelected();
 
             if (selectedMode != activeMode)
@@ -2217,6 +2236,47 @@ namespace RemoteExplorer
             }
 
             return hasActiveStreamMode ? activeStreamMode : SelectedStreamMode();
+        }
+
+        private RemoteStreamMode ResolveStreamModeForConnectedServer(RemoteStreamMode requestedMode)
+        {
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            if (requestedMode == RemoteStreamMode.WebRtc &&
+                ServerCapabilitiesKnown() &&
+                !ConnectedServerSupports("webrtc_offer") &&
+                ConnectedServerSupports("stream_start"))
+            {
+                RemoteExplorerDiagnostics.Info("Connected server does not advertise WebRTC; falling back to UDP/JPEG.");
+                SetStreamStatus("Server uses UDP/JPEG streaming");
+                return RemoteStreamMode.UdpJpeg;
+            }
+
+            if (requestedMode == RemoteStreamMode.UdpJpeg &&
+                ServerCapabilitiesKnown() &&
+                !ConnectedServerSupports("stream_start") &&
+                ConnectedServerSupports("webrtc_offer"))
+            {
+                RemoteExplorerDiagnostics.Info("Connected server does not advertise UDP/JPEG; using WebRTC.");
+                SetStreamStatus("Server uses WebRTC streaming");
+                return RemoteStreamMode.WebRtc;
+            }
+#endif
+
+            return requestedMode;
+        }
+
+        private bool ServerCapabilitiesKnown()
+        {
+            return client.ConnectedServer != null &&
+                client.ConnectedServer.Capabilities != null &&
+                client.ConnectedServer.Capabilities.Length > 0;
+        }
+
+        private bool ConnectedServerSupports(string capability)
+        {
+            var capabilities = client.ConnectedServer != null ? client.ConnectedServer.Capabilities : null;
+            return capabilities != null &&
+                capabilities.Any(item => string.Equals(item, capability, StringComparison.OrdinalIgnoreCase));
         }
 
         private async Task ClickPreviewAsync(Vector2 normalized)

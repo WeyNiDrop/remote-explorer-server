@@ -463,22 +463,29 @@ namespace RemoteExplorer
             }
 
             streamPort = localEndpoint.Port;
+            var streamHost = ResolveLocalAddressFor(controlEndpoint);
             RemoteExplorerDiagnostics.Info(
-                $"UDP/JPEG stream local socket opened port={streamPort} resolution={resolution} fps={ClampStreamFps(fps)} quality={quality}");
+                $"UDP/JPEG stream local socket opened host={streamHost ?? "auto"} port={streamPort} resolution={resolution} fps={ClampStreamFps(fps)} quality={quality}");
             streamCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             // generation 用于丢弃旧 socket 关闭后迟到的 UDP 包。 / Generation drops late packets from an old socket.
             var localStreamGeneration = BeginLocalStreamState();
             streamReceiveTask = ReceiveStreamLoopAsync(streamClient, streamCancellation.Token, localStreamGeneration);
 
+            var streamPayload = new Dictionary<string, object>
+            {
+                ["port"] = streamPort,
+                ["resolution"] = resolution,
+                ["fps"] = ClampStreamFps(fps),
+                ["quality"] = quality
+            };
+            if (!string.IsNullOrEmpty(streamHost))
+            {
+                streamPayload["host"] = streamHost;
+            }
+
             var result = await SendCommandAsync(
                 "stream_start",
-                new Dictionary<string, object>
-                {
-                    ["port"] = streamPort,
-                    ["resolution"] = resolution,
-                    ["fps"] = ClampStreamFps(fps),
-                    ["quality"] = quality
-                },
+                streamPayload,
                 cancellationToken);
 
             if (!result.ok && result.type != "result")
@@ -489,7 +496,12 @@ namespace RemoteExplorer
             }
             else
             {
-                RemoteExplorerDiagnostics.Info("UDP/JPEG stream_start accepted by server.");
+                var serverSourcePort = result.result != null ? result.result.source_port : 0;
+                var serverTargetHost = result.result != null ? result.result.host : string.Empty;
+                var serverTargetPort = result.result != null ? result.result.port : 0;
+                RemoteExplorerDiagnostics.Info(
+                    $"UDP/JPEG stream_start accepted by server target={serverTargetHost}:{serverTargetPort} source_port={serverSourcePort}");
+                await SendStreamFirewallPunchesAsync(serverSourcePort, cancellationToken);
             }
 
             return result;
@@ -1119,6 +1131,71 @@ namespace RemoteExplorer
             catch (NotSupportedException)
             {
             }
+        }
+
+        private async Task SendStreamFirewallPunchesAsync(int serverSourcePort, CancellationToken cancellationToken)
+        {
+            if (streamClient == null || controlEndpoint == null || serverSourcePort <= 0 || serverSourcePort > 65535)
+            {
+                RemoteExplorerDiagnostics.Info("UDP/JPEG stream firewall punch skipped; server source port unavailable.");
+                return;
+            }
+
+            var endpoint = new IPEndPoint(controlEndpoint.Address, serverSourcePort);
+            var probe = Encoding.ASCII.GetBytes("REXPPING");
+            for (var i = 0; i < 3; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    await streamClient.SendAsync(probe, probe.Length, endpoint);
+                    RemoteExplorerDiagnostics.Info($"UDP/JPEG stream firewall punch sent to {endpoint} attempt={i + 1}");
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+                catch (SocketException ex)
+                {
+                    RemoteExplorerDiagnostics.Info("UDP/JPEG stream firewall punch failed: " + ex.Message);
+                    return;
+                }
+
+                if (i < 2)
+                {
+                    await Task.Delay(20, cancellationToken);
+                }
+            }
+        }
+
+        private static string ResolveLocalAddressFor(IPEndPoint remoteEndpoint)
+        {
+            if (remoteEndpoint == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+                {
+                    socket.Connect(remoteEndpoint);
+                    var localEndpoint = socket.LocalEndPoint as IPEndPoint;
+                    var address = localEndpoint != null ? localEndpoint.Address : null;
+                    if (address != null && !IPAddress.Any.Equals(address))
+                    {
+                        return address.ToString();
+                    }
+                }
+            }
+            catch (SocketException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            return null;
         }
 
         private static ushort ReadUInt16(byte[] bytes, int offset)

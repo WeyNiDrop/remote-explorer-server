@@ -69,6 +69,7 @@ class BrowserStreamService(QObject):
         self.pending_frame: Future[None] | None = None
         self.encoder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="RemoteExplorerJpegStream")
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("", 0))
         self.stats_lock = threading.Lock()
         self._reset_stats()
 
@@ -99,9 +100,10 @@ class BrowserStreamService(QObject):
         self.timer.setInterval(max(1, round(1000 / fps)))
         self._reset_stats()
         LOGGER.info(
-            "UDP/JPEG stream start target=%s:%s resolution=%s size=%sx%s fps=%s requested_fps=%s quality=%s chunk_bytes=%s max_chunks=%s pace=%s/%ss",
+            "UDP/JPEG stream start target=%s:%s source_port=%s resolution=%s size=%sx%s fps=%s requested_fps=%s quality=%s chunk_bytes=%s max_chunks=%s pace=%s/%ss",
             host,
             port,
+            _socket_source_port(getattr(self, "socket", None)),
             resolution,
             width,
             height,
@@ -134,6 +136,7 @@ class BrowserStreamService(QObject):
         merged = {
             "_source_host": self.config.host,
             "port": self.config.port,
+            "source_port": _socket_source_port(getattr(self, "socket", None)),
             "width": self.config.width,
             "height": self.config.height,
             "resolution": self.config.resolution,
@@ -160,6 +163,7 @@ class BrowserStreamService(QObject):
             "streaming": self.timer.isActive(),
             "host": self.config.host,
             "port": self.config.port,
+            "source_port": _socket_source_port(getattr(self, "socket", None)),
             "width": self.config.width,
             "height": self.config.height,
             "resolution": self.config.resolution,
@@ -494,3 +498,12 @@ def _clean_host(host: str) -> str:
     if host.startswith("::ffff:"):
         return host.removeprefix("::ffff:")
     return host
+
+
+def _socket_source_port(sock: socket.socket | None) -> int:
+    if sock is None:
+        return 0
+    try:
+        return int(sock.getsockname()[1])
+    except OSError:
+        return 0

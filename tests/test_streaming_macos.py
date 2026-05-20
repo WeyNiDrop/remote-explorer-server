@@ -108,12 +108,16 @@ class FakeChromiumBrowser:
 
 
 class FakeSocket:
-    def __init__(self) -> None:
+    def __init__(self, source_port: int = 0) -> None:
         self.sent: list[tuple[bytes, tuple[str, int]]] = []
+        self.source_port = source_port
 
     def sendto(self, packet: bytes, address: tuple[str, int]) -> int:
         self.sent.append((packet, address))
         return len(packet)
+
+    def getsockname(self) -> tuple[str, int]:
+        return ("0.0.0.0", self.source_port)
 
 
 class FakeCdpConnection:
@@ -248,13 +252,14 @@ class _PartialFrame:
 
 @unittest.skipIf(ChromiumStreamService is None, "PySide6 is not installed")
 class MacChromiumStreamTests(unittest.TestCase):
-    def test_stream_start_uses_control_source_host_and_macos_fps_cap(self) -> None:
+    def test_stream_start_uses_control_source_host_and_reports_source_port(self) -> None:
         service = ChromiumStreamService.__new__(ChromiumStreamService)
         service.browser = FakeChromiumBrowser()
         service.timer = FakeTimer()
         service.config = None
         service.target_host = None
         service.target_address = None
+        service.socket = FakeSocket(source_port=37123)
         service._send_frame = lambda: None
 
         status = ChromiumStreamService.start(
@@ -276,6 +281,7 @@ class MacChromiumStreamTests(unittest.TestCase):
         )
         self.assertEqual(status["host"], "192.168.1.25")
         self.assertEqual(status["port"], 49152)
+        self.assertEqual(status["source_port"], 37123)
         self.assertEqual(status["resolution"], "720p")
         self.assertEqual(status["width"], 1280)
         self.assertEqual(status["height"], 720)
@@ -305,7 +311,8 @@ class MacChromiumStreamTests(unittest.TestCase):
         browser.viewport_height = 1554
         browser._stream_viewport = None
 
-        ChromiumBrowserService.set_stream_viewport(browser, 960, 540)
+        with patch.object(chromium_backend.sys, "platform", "darwin"):
+            ChromiumBrowserService.set_stream_viewport(browser, 960, 540)
 
         self.assertEqual(browser.viewport_width, 1280)
         self.assertEqual(browser.viewport_height, 720)
@@ -321,7 +328,8 @@ class MacChromiumStreamTests(unittest.TestCase):
         browser.viewport_height = 720
         browser._stream_viewport = (960, 540)
 
-        ChromiumBrowserService.note_capture_size(browser, 5120, 1554)
+        with patch.object(chromium_backend.sys, "platform", "darwin"):
+            ChromiumBrowserService.note_capture_size(browser, 5120, 1554)
 
         self.assertEqual((browser.viewport_width, browser.viewport_height), (1280, 720))
 
@@ -332,7 +340,8 @@ class MacChromiumStreamTests(unittest.TestCase):
         browser.viewport_height = 720
         browser._stream_viewport = (960, 540)
 
-        ChromiumBrowserService._capture_jpeg_result(browser, 55)
+        with patch.object(chromium_backend.sys, "platform", "darwin"):
+            ChromiumBrowserService._capture_jpeg_result(browser, 55)
 
         self.assertEqual(browser.connection.calls[-1][0], "Page.captureScreenshot")
         self.assertEqual(
@@ -340,6 +349,19 @@ class MacChromiumStreamTests(unittest.TestCase):
             {"x": 0, "y": 0, "width": 1280, "height": 720, "scale": 1},
         )
         self.assertNotIn("Emulation.setDeviceMetricsOverride", [method for method, _payload in browser.connection.calls])
+
+    def test_chromium_stream_capture_uses_visible_window_on_windows(self) -> None:
+        browser = ChromiumBrowserService.__new__(ChromiumBrowserService)
+        browser.connection = FakeCdpConnection()
+        browser.viewport_width = 1280
+        browser.viewport_height = 720
+        browser._stream_viewport = (960, 540)
+
+        with patch.object(chromium_backend.sys, "platform", "win32"):
+            ChromiumBrowserService._capture_jpeg_result(browser, 55)
+
+        self.assertEqual(browser.connection.calls[-1][0], "Page.captureScreenshot")
+        self.assertNotIn("clip", browser.connection.calls[-1][1])
 
     def test_chromium_reconnect_restores_active_stream_viewport(self) -> None:
         browser = ChromiumBrowserService.__new__(ChromiumBrowserService)
@@ -353,7 +375,8 @@ class MacChromiumStreamTests(unittest.TestCase):
         configured = []
         browser._configure_page = lambda: configured.append(True)
 
-        ChromiumBrowserService._reconnect_page(browser)
+        with patch.object(chromium_backend.sys, "platform", "darwin"):
+            ChromiumBrowserService._reconnect_page(browser)
 
         self.assertEqual(configured, [True])
         self.assertEqual(old_connection.calls[-1], ("close", {}))

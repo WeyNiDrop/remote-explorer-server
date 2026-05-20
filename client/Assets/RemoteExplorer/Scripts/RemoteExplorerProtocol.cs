@@ -316,8 +316,11 @@ namespace RemoteExplorer
         public string type;
         public string sdp;
         public string resolution;
+        public string host;
         public int width;
         public int height;
+        public int port;
+        public int source_port;
         public int fps;
         public bool available;
         public string error;

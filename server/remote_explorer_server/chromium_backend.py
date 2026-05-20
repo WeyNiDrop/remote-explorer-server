@@ -205,6 +205,11 @@ class ChromiumBrowserService:
         viewport_width = max(1, int(width))
         viewport_height = max(1, int(height))
         self._stream_viewport = (viewport_width, viewport_height)
+        if sys.platform != "darwin":
+            self.ensure_minimum_viewport(viewport_width, viewport_height)
+            LOGGER.info("Chromium stream target set size=%sx%s using visible window capture", viewport_width, viewport_height)
+            return
+
         try:
             current_width, current_height = self._refresh_viewport_size()
         except Exception as exc:
@@ -222,6 +227,9 @@ class ChromiumBrowserService:
         if self._stream_viewport is None:
             return
         self._stream_viewport = None
+        if sys.platform != "darwin":
+            return
+
         try:
             self._refresh_viewport_size()
         except Exception as exc:
@@ -261,7 +269,7 @@ class ChromiumBrowserService:
             LOGGER.debug("Could not resize Chromium window: %s", exc)
 
     def note_capture_size(self, width: int, height: int) -> None:
-        if self._stream_viewport is not None:
+        if self._stream_viewport is not None and sys.platform == "darwin":
             return
         self.viewport_width = max(1, int(width))
         self.viewport_height = max(1, int(height))
@@ -287,7 +295,7 @@ class ChromiumBrowserService:
             "fromSurface": True,
             "captureBeyondViewport": False,
         }
-        if self._stream_viewport is not None:
+        if self._stream_viewport is not None and sys.platform == "darwin":
             payload["clip"] = {
                 "x": 0,
                 "y": 0,
@@ -601,6 +609,7 @@ class ChromiumStreamService(QObject):
         self.pending_frame: Future[None] | None = None
         self.encoder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="RemoteExplorerChromiumStream")
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("", 0))
         self.stats_lock = threading.Lock()
         self.frames_sent = 0
         self.last_stats_at = time.monotonic()
@@ -622,9 +631,10 @@ class ChromiumStreamService(QObject):
         self.browser.set_stream_viewport(width, height)
         self.timer.setInterval(max(1, round(1000 / fps)))
         LOGGER.info(
-            "Chromium UDP stream start target=%s:%s resolution=%s size=%sx%s fps=%s requested_fps=%s quality=%s chunk_bytes=%s max_chunks=%s pace=%s/%ss",
+            "Chromium UDP stream start target=%s:%s source_port=%s resolution=%s size=%sx%s fps=%s requested_fps=%s quality=%s chunk_bytes=%s max_chunks=%s pace=%s/%ss",
             host,
             port,
+            _socket_source_port(getattr(self, "socket", None)),
             resolution,
             width,
             height,
@@ -654,6 +664,7 @@ class ChromiumStreamService(QObject):
         merged = {
             "_source_host": self.config.host,
             "port": self.config.port,
+            "source_port": _socket_source_port(getattr(self, "socket", None)),
             "width": self.config.width,
             "height": self.config.height,
             "resolution": self.config.resolution,
@@ -680,6 +691,7 @@ class ChromiumStreamService(QObject):
             "streaming": self.timer.isActive(),
             "host": self.config.host,
             "port": self.config.port,
+            "source_port": _socket_source_port(getattr(self, "socket", None)),
             "width": self.config.width,
             "height": self.config.height,
             "resolution": self.config.resolution,
@@ -784,6 +796,15 @@ class ChromiumStreamConfig:
         self.fps = fps
         self.quality = quality
         self.resolution = resolution
+
+
+def _socket_source_port(sock: socket.socket | None) -> int:
+    if sock is None:
+        return 0
+    try:
+        return int(sock.getsockname()[1])
+    except OSError:
+        return 0
 
 
 class ChromiumBrowserController:
