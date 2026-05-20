@@ -1,0 +1,74 @@
+name: Package server
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        run: python -m pytest
+
+  package:
+    name: Package ${{ matrix.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact-name: remote-explorer-server-windows
+            executable: dist/remote-explorer-server.exe
+          - os: macos-latest
+            artifact-name: remote-explorer-server-macos
+            executable: dist/remote-explorer-server
+          - os: ubuntu-latest
+            artifact-name: remote-explorer-server-linux
+            executable: dist/remote-explorer-server
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install package dependencies
+        run: python -m pip install -e ".[server,webrtc]" pyinstaller
+
+      - name: Build executable
+        run: pyinstaller --clean --noconfirm main.spec
+
+      - name: Smoke test artifact path
+        shell: bash
+        run: test -f "${{ matrix.executable }}"
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.executable }}
