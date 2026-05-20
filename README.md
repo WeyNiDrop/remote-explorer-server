@@ -19,6 +19,17 @@ protocol; a Python development client is included for testing the first slice.
 
 ## Quick Start
 
+macOS/Linux Terminal:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[server,dev]"
+python -m remote_explorer_server --password 123456
+```
+
+Windows PowerShell:
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -30,13 +41,21 @@ The server uses a Chromium-family browser engine when Chrome, Edge, or Chromium
 is installed. This improves compatibility with mainstream HTML5 video sites. To
 point to a browser executable:
 
+macOS/Linux Terminal:
+
+```bash
+python -m remote_explorer_server --browser-engine chromium --browser-executable "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+```
+
+Windows PowerShell:
+
 ```powershell
 python -m remote_explorer_server --browser-engine chromium --browser-executable "C:\Program Files\Google\Chrome\Application\chrome.exe"
 ```
 
-In another terminal:
+In another Terminal or PowerShell window:
 
-```powershell
+```bash
 python tools/dev_client.py discover
 python tools/dev_client.py navigate --host 127.0.0.1 --password 123456 https://example.com
 python tools/dev_client.py click --host 127.0.0.1 --password 123456 200 300
@@ -75,6 +94,14 @@ Recommended first test:
 
 1. Start the Python server:
 
+   macOS/Linux Terminal:
+
+   ```bash
+   PYTHONPATH=server python -m remote_explorer_server --password 123456
+   ```
+
+   Windows PowerShell:
+
    ```powershell
    $env:PYTHONPATH='server'
    python -m remote_explorer_server --password 123456
@@ -88,7 +115,7 @@ Recommended first test:
 
 Without a password:
 
-```powershell
+```bash
 python -m remote_explorer_server
 python tools/dev_client.py navigate --host 127.0.0.1 https://example.com
 ```

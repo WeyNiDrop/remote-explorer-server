@@ -49,6 +49,29 @@ class FakeCdpConnection:
         return {}
 
 
+class FakeBrowser:
+    def __init__(self, evaluate_result, request_fullscreen_result=None) -> None:
+        self.evaluate_result = evaluate_result
+        self.request_fullscreen_result = request_fullscreen_result
+        self.shortcuts = []
+        self.request_fullscreen_calls = 0
+        self.refresh_scheduled = 0
+
+    def evaluate(self, script):
+        return self.evaluate_result
+
+    def request_media_fullscreen(self):
+        self.request_fullscreen_calls += 1
+        return self.request_fullscreen_result
+
+    def send_key_shortcut(self, action):
+        self.shortcuts.append(action)
+        return True
+
+    def schedule_fullscreen_topmost_refresh(self):
+        self.refresh_scheduled += 1
+
+
 @unittest.skipIf(ChromiumBrowserService is None, "PySide6 is not installed")
 class ChromiumBrowserServiceTests(unittest.TestCase):
     def test_close_without_connection_after_connect_failure(self) -> None:
@@ -120,6 +143,80 @@ class ChromiumBrowserServiceTests(unittest.TestCase):
         self.assertEqual(payloads[0]["nativeVirtualKeyCode"], 3)
         self.assertEqual(payloads[0]["text"], "f")
         self.assertNotIn("text", payloads[1])
+
+    def test_macos_fullscreen_uses_confirmed_dom_request_before_key_fallback(self) -> None:
+        browser = FakeBrowser(
+            {
+                "media_found": True,
+                "controlled": True,
+                "media_fullscreen": False,
+                "media_action": "fullscreen",
+                "media_reason": "",
+            },
+            {
+                "media_found": True,
+                "controlled": True,
+                "media_fullscreen": True,
+                "media_action": "fullscreen",
+                "media_reason": "dom_fullscreen",
+            },
+        )
+        controller = chromium_backend.ChromiumBrowserController(browser, None, False)
+        responses = []
+
+        with patch.object(chromium_backend.sys, "platform", "darwin"):
+            controller._media_control({"action": "fullscreen"}, responses.append)
+
+        self.assertEqual(browser.request_fullscreen_calls, 1)
+        self.assertEqual(browser.shortcuts, [])
+        self.assertEqual(responses[0]["result"]["media_reason"], "dom_fullscreen")
+
+    def test_macos_fullscreen_uses_key_fallback_when_dom_request_fails(self) -> None:
+        browser = FakeBrowser(
+            {
+                "media_found": True,
+                "controlled": False,
+                "media_fullscreen": False,
+                "media_action": "fullscreen",
+                "media_reason": "keyboard_shortcut_required",
+            },
+            {
+                "media_found": True,
+                "controlled": False,
+                "media_fullscreen": False,
+                "media_action": "fullscreen",
+                "media_reason": "dom_fullscreen_rejected",
+            },
+        )
+        controller = chromium_backend.ChromiumBrowserController(browser, None, False)
+        responses = []
+
+        with patch.object(chromium_backend.sys, "platform", "darwin"):
+            controller._media_control({"action": "fullscreen"}, responses.append)
+
+        self.assertEqual(browser.request_fullscreen_calls, 1)
+        self.assertEqual(browser.shortcuts, ["fullscreen"])
+        self.assertEqual(responses[0]["result"]["media_reason"], "keyboard_shortcut")
+
+    def test_windows_fullscreen_keeps_existing_shortcut_fallback(self) -> None:
+        browser = FakeBrowser(
+            {
+                "media_found": True,
+                "controlled": True,
+                "media_fullscreen": True,
+                "media_action": "fullscreen",
+                "media_reason": "dom_fullscreen",
+            }
+        )
+        controller = chromium_backend.ChromiumBrowserController(browser, None, False)
+        responses = []
+
+        with patch.object(chromium_backend.sys, "platform", "win32"):
+            controller._media_control({"action": "fullscreen"}, responses.append)
+
+        self.assertEqual(browser.request_fullscreen_calls, 0)
+        self.assertEqual(browser.shortcuts, ["fullscreen"])
+        self.assertEqual(responses[0]["result"]["media_reason"], "keyboard_shortcut")
 
 
 if __name__ == "__main__":

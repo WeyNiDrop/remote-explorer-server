@@ -335,6 +335,102 @@ class ChromiumBrowserService:
         remote = result.get("result") or {}
         return remote.get("value")
 
+    def request_media_fullscreen(self) -> Any:
+        return self.evaluate(
+            "(() => {\n"
+            + MEDIA_CONTROL_HELPERS
+            + """
+  return new Promise(resolve => {
+    const media = remoteExplorerFindMedia();
+    if (!media) {
+      resolve({
+        media_found: false,
+        controlled: false,
+        media_action: "fullscreen",
+        media_reason: "no_media"
+      });
+      return;
+    }
+
+    const fullscreenElement = () =>
+      document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement;
+    const status = (controlled, reason) => ({
+      ...remoteExplorerMediaStatus(media),
+      controlled,
+      media_action: "fullscreen",
+      media_reason: reason
+    });
+
+    if (fullscreenElement()) {
+      resolve(status(true, "already_fullscreen"));
+      return;
+    }
+
+    const target = remoteExplorerPlayerRoot(media) || media;
+    const requestTarget =
+      target.requestFullscreen ||
+      target.webkitRequestFullscreen ||
+      target.mozRequestFullScreen ||
+      target.msRequestFullscreen
+        ? target
+        : media;
+    const request =
+      requestTarget.requestFullscreen ||
+      requestTarget.webkitRequestFullscreen ||
+      requestTarget.mozRequestFullScreen ||
+      requestTarget.msRequestFullscreen;
+    if (!request) {
+      resolve(status(false, "keyboard_shortcut_required"));
+      return;
+    }
+
+    let completed = false;
+    let timer = 0;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("fullscreenchange", onChange, true);
+      document.removeEventListener("webkitfullscreenchange", onChange, true);
+      document.removeEventListener("mozfullscreenchange", onChange, true);
+      document.removeEventListener("MSFullscreenChange", onChange, true);
+    };
+    const finish = (controlled, reason) => {
+      if (completed) return;
+      completed = true;
+      cleanup();
+      resolve(status(controlled, reason));
+    };
+    const check = reason => {
+      const active = !!fullscreenElement();
+      finish(active, active ? "dom_fullscreen" : reason);
+    };
+    const onChange = () => {
+      if (fullscreenElement()) finish(true, "dom_fullscreen");
+    };
+
+    document.addEventListener("fullscreenchange", onChange, true);
+    document.addEventListener("webkitfullscreenchange", onChange, true);
+    document.addEventListener("mozfullscreenchange", onChange, true);
+    document.addEventListener("MSFullscreenChange", onChange, true);
+    timer = window.setTimeout(() => check("dom_fullscreen_timeout"), 1000);
+
+    try {
+      const result = request.call(requestTarget);
+      if (result && typeof result.then === "function") {
+        result
+          .then(() => window.setTimeout(() => check("dom_fullscreen"), 0))
+          .catch(() => finish(false, "dom_fullscreen_rejected"));
+      }
+    } catch (_) {
+      finish(false, "dom_fullscreen_exception");
+    }
+  });
+})()
+"""
+        )
+
     def click(self, x: float, y: float, source_width: float = 0, source_height: float = 0) -> dict[str, Any]:
         view_x = x * self.viewport_width / source_width if source_width and source_width > 1 else x
         view_y = y * self.viewport_height / source_height if source_height and source_height > 1 else y
@@ -984,7 +1080,22 @@ return remoteExplorerRunMediaAction(media, action, amount);
 }})()
 """
         )
-        if isinstance(value, dict) and (action in {"fullscreen", "exit_fullscreen"} or (action in {"next", "previous"} and not value.get("controlled"))):
+        if sys.platform == "darwin" and action == "fullscreen" and isinstance(value, dict) and not value.get("media_fullscreen"):
+            request_value = self.browser.request_media_fullscreen()
+            if isinstance(request_value, dict):
+                value = request_value
+
+        if isinstance(value, dict):
+            if sys.platform == "darwin" and action in {"fullscreen", "exit_fullscreen"}:
+                needs_shortcut = not bool(value.get("controlled"))
+            else:
+                needs_shortcut = action in {"fullscreen", "exit_fullscreen"} or (
+                    action in {"next", "previous"} and not value.get("controlled")
+                )
+        else:
+            needs_shortcut = False
+
+        if needs_shortcut:
             if self.browser.send_key_shortcut(action):
                 value["controlled"] = True
                 value["media_reason"] = "keyboard_shortcut"
