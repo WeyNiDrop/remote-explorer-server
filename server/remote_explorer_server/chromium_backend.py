@@ -129,9 +129,10 @@ class ChromiumBrowserService:
 
     def close(self) -> None:
         self._set_fullscreen_topmost(False)
-        if self.process.poll() is None:
+        connection = getattr(self, "connection", None)
+        if connection is not None and self.process.poll() is None:
             try:
-                self.connection.call("Browser.close", timeout=2.0)
+                connection.call("Browser.close", timeout=2.0)
             except Exception as exc:
                 LOGGER.debug("Could not close Chromium through CDP: %s", exc)
                 try:
@@ -145,10 +146,11 @@ class ChromiumBrowserService:
                     return
                 except subprocess.TimeoutExpired:
                     LOGGER.debug("Chromium did not exit after CDP close; terminating")
-        try:
-            self.connection.close()
-        except Exception:
-            pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
         if self.process.poll() is None:
             self.process.terminate()
             try:
