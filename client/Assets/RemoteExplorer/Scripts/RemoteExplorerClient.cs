@@ -66,6 +66,8 @@ namespace RemoteExplorer
         public const int MaxStreamFps = 60;
         public const int DefaultStreamQuality = 55;
 
+        public event Action<DiscoveredServer, string> ConnectionLost;
+
         public bool IsConnected => controlClient != null && !string.IsNullOrEmpty(sessionId);
         public bool IsStreaming => streamClient != null;
         public DiscoveredServer ConnectedServer { get; private set; }
@@ -119,7 +121,7 @@ namespace RemoteExplorer
                     UdpReceiveResult received;
                     try
                     {
-                        received = receiveTask.Result;
+                        received = await receiveTask;
                     }
                     catch (SocketException)
                     {
@@ -246,6 +248,7 @@ namespace RemoteExplorer
             Disconnect();
             controlEndpoint = new IPEndPoint(IPAddress.Parse(server.Address), server.ControlPort);
             controlClient = new UdpClient(0);
+            ConfigureStreamSocket(controlClient.Client);
             ConnectedServer = server;
 
             var clientId = RemoteExplorerProtocol.ClientId();
@@ -552,9 +555,12 @@ namespace RemoteExplorer
             }
         }
 
-        public async Task<CommandEnvelope> BrowserCommandAsync(string command, CancellationToken cancellationToken = default)
+        public async Task<CommandEnvelope> BrowserCommandAsync(
+            string command,
+            CancellationToken cancellationToken = default,
+            float timeoutSeconds = DefaultControlTimeoutSeconds)
         {
-            return await SendCommandAsync(command, new Dictionary<string, object>(), cancellationToken);
+            return await SendCommandAsync(command, new Dictionary<string, object>(), cancellationToken, timeoutSeconds);
         }
 
         public async Task<CommandEnvelope> WebRtcOfferAsync(
@@ -622,10 +628,29 @@ namespace RemoteExplorer
                 auth["signature"] = RemoteExplorerProtocol.SignMessage(message, sessionKey);
             }
 
-            return await SendRequestAsync<CommandEnvelope>(message, cancellationToken, timeoutSeconds);
+            try
+            {
+                var result = await SendRequestAsync<CommandEnvelope>(message, cancellationToken, timeoutSeconds);
+                if (IsConnectionInvalidError(result))
+                {
+                    MarkConnectionLost(result.error.message);
+                }
+
+                return result;
+            }
+            catch (Exception ex) when (IsConnectionFailure(ex, cancellationToken))
+            {
+                MarkConnectionLost(ex.Message);
+                throw;
+            }
         }
 
         public void Disconnect()
+        {
+            DisconnectInternal();
+        }
+
+        private void DisconnectInternal()
         {
             StopLocalStream();
             sessionId = null;
@@ -638,9 +663,59 @@ namespace RemoteExplorer
             controlClient = null;
         }
 
+        private void MarkConnectionLost(string reason)
+        {
+            if (!IsConnected && controlClient == null)
+            {
+                return;
+            }
+
+            var server = ConnectedServer;
+            var message = string.IsNullOrWhiteSpace(reason) ? "Server connection lost." : reason;
+            RemoteExplorerDiagnostics.Info("Server connection lost: " + message);
+            DisconnectInternal();
+            ConnectionLost?.Invoke(server, message);
+        }
+
+        private static bool IsConnectionInvalidError(CommandEnvelope result)
+        {
+            if (result == null || result.error == null)
+            {
+                return false;
+            }
+
+            return string.Equals(result.error.code, "invalid_session", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(result.error.code, "auth_required", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(result.error.code, "bad_signature", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(result.error.code, "replay", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsConnectionFailure(Exception ex, CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+
+            return IsConnectionFailureException(ex);
+        }
+
+        private static bool IsConnectionFailureException(Exception ex)
+        {
+            if (ex is AggregateException aggregate)
+            {
+                return aggregate.Flatten().InnerExceptions.Any(IsConnectionFailureException);
+            }
+
+            return ex is TimeoutException ||
+                ex is SocketException ||
+                ex is ObjectDisposedException;
+        }
+
         public void Dispose()
         {
             Disconnect();
+            ConnectionLost = null;
             requestLock.Dispose();
         }
 
@@ -1112,7 +1187,7 @@ namespace RemoteExplorer
                         break;
                     }
 
-                    var received = receiveTask.Result;
+                    var received = await receiveTask;
                     var json = Encoding.UTF8.GetString(received.Buffer);
                     var baseEnvelope = JsonUtility.FromJson<CommandEnvelope>(json);
                     if (baseEnvelope == null || baseEnvelope.request_id != requestId)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QMouseEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -134,29 +134,74 @@ class FramelessTitleBar(QFrame):
         self.setObjectName("titleBar")
         self.setFixedHeight(height)
         self._drag_offset: QPoint | None = None
+        self._system_move_active = False
+
+    def add_drag_handle(self, widget: QWidget) -> None:
+        widget.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if isinstance(watched, QWidget) and watched is not self:
+            if event.type() == QEvent.Type.MouseButtonPress and isinstance(event, QMouseEvent):
+                return self._handle_mouse_press(event)
+            if event.type() == QEvent.Type.MouseMove and isinstance(event, QMouseEvent):
+                return self._handle_mouse_move(event)
+            if event.type() == QEvent.Type.MouseButtonRelease and isinstance(event, QMouseEvent):
+                return self._handle_mouse_release(event)
+            if event.type() == QEvent.Type.MouseButtonDblClick and isinstance(event, QMouseEvent):
+                return self._handle_mouse_double_click(event)
+        return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            window = self.window()
-            self._drag_offset = event.globalPosition().toPoint() - window.frameGeometry().topLeft()
-            event.accept()
+        if self._handle_mouse_press(event):
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if event.buttons() & Qt.MouseButton.LeftButton and self._drag_offset is not None:
-            window = self.window()
-            if not window.isMaximized():
-                window.move(event.globalPosition().toPoint() - self._drag_offset)
-            event.accept()
+        if self._handle_mouse_move(event):
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        self._drag_offset = None
+        if self._handle_mouse_release(event):
+            return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if self._handle_mouse_double_click(event):
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _handle_mouse_press(self, event: QMouseEvent) -> bool:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        window = self.window()
+        self._drag_offset = event.globalPosition().toPoint() - window.frameGeometry().topLeft()
+        self._system_move_active = False
+        if not window.isMaximized():
+            window_handle = window.windowHandle()
+            if window_handle is not None:
+                self._system_move_active = window_handle.startSystemMove()
+        event.accept()
+        return True
+
+    def _handle_mouse_move(self, event: QMouseEvent) -> bool:
+        if not (event.buttons() & Qt.MouseButton.LeftButton) or self._drag_offset is None:
+            return False
+        window = self.window()
+        if not window.isMaximized() and not self._system_move_active:
+            window.move(event.globalPosition().toPoint() - self._drag_offset)
+        event.accept()
+        return True
+
+    def _handle_mouse_release(self, event: QMouseEvent) -> bool:
+        if event.button() != Qt.MouseButton.LeftButton and self._drag_offset is None:
+            return False
+        self._drag_offset = None
+        self._system_move_active = False
+        event.accept()
+        return True
+
+    def _handle_mouse_double_click(self, event: QMouseEvent) -> bool:
         if self.allow_maximize and event.button() == Qt.MouseButton.LeftButton:
             window = self.window()
             if window.isMaximized():
@@ -164,8 +209,8 @@ class FramelessTitleBar(QFrame):
             else:
                 window.showMaximized()
             event.accept()
-            return
-        super().mouseDoubleClickEvent(event)
+            return True
+        return False
 
 
 class ServerControlPanel(QWidget):
@@ -223,12 +268,17 @@ class ServerControlPanel(QWidget):
             "background:#09243e;border:1px solid #2de2e6;border-radius:12px;"
             "color:#e7f3ff;font-size:14px;font-weight:800;"
         )
+        bar.add_drag_handle(mark)
         layout.addWidget(mark)
 
         title = QVBoxLayout()
         title.setSpacing(0)
-        title.addWidget(self._text("RCViewer", 22, bold=True))
-        title.addWidget(self._text("服务端控制台", 12, muted=True))
+        title_label = self._text("RCViewer", 22, bold=True)
+        subtitle_label = self._text("服务端控制台", 12, muted=True)
+        bar.add_drag_handle(title_label)
+        bar.add_drag_handle(subtitle_label)
+        title.addWidget(title_label)
+        title.addWidget(subtitle_label)
         layout.addLayout(title)
         layout.addStretch(1)
 
@@ -384,7 +434,9 @@ class ServerControlPanel(QWidget):
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        layout.addWidget(ServerControlPanel._text(title, 20, bold=True))
+        title_label = ServerControlPanel._text(title, 20, bold=True)
+        bar.add_drag_handle(title_label)
+        layout.addWidget(title_label)
         layout.addStretch(1)
         close = ServerControlPanel._window_button("×")
         close.setProperty("windowClose", True)

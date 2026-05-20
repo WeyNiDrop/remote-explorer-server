@@ -27,6 +27,8 @@ namespace RemoteExplorer
         private const float StreamWatchdogSeconds = 12f;
         private const float StreamRestartCooldownSeconds = 12f;
         private const float StreamRenderLogIntervalSeconds = 5f;
+        private const float ConnectionHealthIntervalSeconds = 5f;
+        private const float ConnectionHealthTimeoutSeconds = 1.5f;
         private const int StreamStatusLogLimit = 80;
 
         private readonly RemoteExplorerClient client = new RemoteExplorerClient();
@@ -132,7 +134,9 @@ namespace RemoteExplorer
         private bool suppressRemoteInputEndEdit;
         private bool remoteInputCommitInFlight;
         private bool remoteKeyboardFlushInFlight;
+        private bool connectionHealthCheckInFlight;
         private int remoteInputVersion;
+        private float nextConnectionHealthCheckAt = -1f;
         private bool canvasReady;
         private string fallbackPassword = string.Empty;
         private string fallbackUrl = "https://www.youtube.com";
@@ -167,6 +171,7 @@ namespace RemoteExplorer
             DontDestroyOnLoad(gameObject);
             RemoteExplorerDiagnostics.Info($"RemoteExplorerApp awake instance={instanceId}");
 
+            client.ConnectionLost += HandleConnectionLost;
             lifetime = new CancellationTokenSource();
             settings = RemoteExplorerSettings.Load();
             fallbackPassword = settings.Password ?? string.Empty;
@@ -204,6 +209,7 @@ namespace RemoteExplorer
 
             lifetime?.Cancel();
             lifetime?.Dispose();
+            client.ConnectionLost -= HandleConnectionLost;
             client.Dispose();
         }
 
@@ -228,6 +234,7 @@ namespace RemoteExplorer
             }
 
             UpdateStreamWatchdog();
+            UpdateConnectionHealth();
             PollRemoteKeyboardInput();
         }
 
@@ -1333,7 +1340,6 @@ namespace RemoteExplorer
         {
             try
             {
-                await ClosePageAsync();
                 await StopStreamAsync();
             }
             finally
@@ -1342,6 +1348,98 @@ namespace RemoteExplorer
                 SetCommandButtons(false);
                 ShowConnectPage();
                 SetStatus("已断开服务器连接");
+            }
+        }
+
+        private void HandleConnectionLost(DiscoveredServer server, string reason)
+        {
+            if (lifetime == null || lifetime.IsCancellationRequested)
+            {
+                return;
+            }
+
+            MarkServerOffline(server);
+            streamRestartInFlight = false;
+            streamStartInFlight = false;
+            streamSettingsDirty = false;
+            connectionHealthCheckInFlight = false;
+            nextConnectionHealthCheckAt = -1f;
+            hasActiveStreamMode = false;
+            lastStreamFrameAt = -1f;
+            nextStreamWatchdogAt = -1f;
+            remoteKeyboardCommands.Clear();
+#if REMOTE_EXPLORER_HAS_WEBRTC
+            if (webRtcPlayback != null && webRtcPlayback.IsActive)
+            {
+                FireAndForget(() => webRtcPlayback.StopAsync(lifetime.Token));
+            }
+#endif
+            ResetStreamRenderStats();
+            SetButtonLabel(streamToggleButton, "打开串流");
+            SetStreamStatus("服务器连接已断开");
+            SetCommandButtons(false);
+            ShowConnectPage();
+            SetStatus("服务器连接已断开: " + reason);
+        }
+
+        private void MarkServerOffline(DiscoveredServer offlineServer)
+        {
+            if (offlineServer == null)
+            {
+                return;
+            }
+
+            var removed = servers.RemoveAll(server => SameServer(server, offlineServer));
+            if (removed > 0)
+            {
+                RebuildServerDropdown();
+            }
+        }
+
+        private static bool SameServer(DiscoveredServer left, DiscoveredServer right)
+        {
+            if (left == null || right == null)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(left.Id) && !string.IsNullOrEmpty(right.Id) && left.Id == right.Id)
+            {
+                return true;
+            }
+
+            return string.Equals(left.Address, right.Address, StringComparison.OrdinalIgnoreCase) &&
+                left.ControlPort == right.ControlPort;
+        }
+
+        private void UpdateConnectionHealth()
+        {
+            if (!client.IsConnected || connectionHealthCheckInFlight || Time.unscaledTime < nextConnectionHealthCheckAt)
+            {
+                return;
+            }
+
+            connectionHealthCheckInFlight = true;
+            nextConnectionHealthCheckAt = Time.unscaledTime + ConnectionHealthIntervalSeconds;
+            FireAndForget(CheckConnectionHealthAsync);
+        }
+
+        private async Task CheckConnectionHealthAsync()
+        {
+            try
+            {
+                await client.BrowserCommandAsync("status", lifetime.Token, ConnectionHealthTimeoutSeconds);
+            }
+            catch (Exception ex)
+            {
+                if (client.IsConnected)
+                {
+                    Debug.LogWarning("[RemoteExplorer] Connection health check failed: " + ex.Message);
+                }
+            }
+            finally
+            {
+                connectionHealthCheckInFlight = false;
             }
         }
 
@@ -1566,6 +1664,11 @@ namespace RemoteExplorer
             try
             {
                 var result = await client.MediaStatusAsync(lifetime.Token);
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 if (result.ok || result.type == "result")
                 {
                     UpdateMediaControlLabels(result.result);
@@ -1578,6 +1681,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 SetStatus("Player status failed: " + ex.Message);
             }
         }
@@ -1588,6 +1696,11 @@ namespace RemoteExplorer
             try
             {
                 var result = await client.MediaControlAsync(action, amount, lifetime.Token);
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 if (result.ok || result.type == "result")
                 {
                     UpdateMediaControlLabels(result.result);
@@ -1600,6 +1713,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 SetStatus("Media command failed: " + ex.Message);
             }
         }
@@ -1762,6 +1880,11 @@ namespace RemoteExplorer
             try
             {
                 var webRtcResult = await webRtcPlayback.StartAsync(resolution, fps, lifetime.Token);
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 if (webRtcResult.ok || webRtcResult.type == "result")
                 {
                     SetButtonLabel(streamToggleButton, "关闭串流");
@@ -1783,6 +1906,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 SetStreamStatus("WebRTC failed: " + ex.Message);
                 SetStatus("WebRTC stream failed: " + ex.Message);
                 SetButtonLabel(streamToggleButton, "打开串流");
@@ -1804,6 +1932,11 @@ namespace RemoteExplorer
                     fps,
                     RemoteExplorerClient.DefaultStreamQuality,
                     lifetime.Token);
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 if (result.ok || result.type == "result")
                 {
                     SetButtonLabel(streamToggleButton, "关闭串流");
@@ -1821,6 +1954,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 SetStatus("Stream failed: " + ex.Message);
             }
         }
@@ -1875,6 +2013,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 Debug.LogWarning("[RemoteExplorer] Image stream stop failed: " + ex.Message);
             }
         }
@@ -1894,6 +2037,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 Debug.LogWarning("[RemoteExplorer] WebRTC stop failed: " + ex.Message);
             }
         }
@@ -1944,6 +2092,11 @@ namespace RemoteExplorer
                     fps,
                     RemoteExplorerClient.DefaultStreamQuality,
                     lifetime.Token);
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 if (result.ok || result.type == "result")
                 {
                     SetStreamStatus($"Stream {resolution} / {fps}fps");
@@ -1955,6 +2108,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 SetStatus("Stream config failed: " + ex.Message);
             }
         }
@@ -2015,6 +2173,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 SetStatus("Stream restart failed: " + ex.Message);
             }
             finally
@@ -2081,6 +2244,11 @@ namespace RemoteExplorer
             try
             {
                 var result = await client.ClickAsync(x, y, latestSourceWidth, latestSourceHeight, lifetime.Token);
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 if (result.ok || result.type == "result")
                 {
                     var click = result.result;
@@ -2107,6 +2275,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 SetStatus("Click failed: " + ex.Message);
             }
         }
@@ -2368,6 +2541,12 @@ namespace RemoteExplorer
                     var result = command.Kind == "key"
                         ? await client.SendKeyAsync(command.Value, lifetime.Token)
                         : await client.SendTextAsync(command.Value, lifetime.Token);
+                    if (!client.IsConnected)
+                    {
+                        remoteKeyboardCommands.Clear();
+                        break;
+                    }
+
                     if (!result.ok && result.type != "result")
                     {
                         var error = result.error != null
@@ -2400,6 +2579,11 @@ namespace RemoteExplorer
             try
             {
                 var result = await action();
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 if (result.ok || result.type == "result")
                 {
                     SetStatus(successMessage);
@@ -2411,6 +2595,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex)
             {
+                if (!client.IsConnected)
+                {
+                    return;
+                }
+
                 SetStatus("Command failed: " + ex.Message);
             }
         }

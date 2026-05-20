@@ -109,16 +109,39 @@ class ChromiumBrowserService:
         self.connection = self._connect()
         self.viewport_width = 1280
         self.viewport_height = 720
+        self._fullscreen_topmost = False
         self._configure_page()
         self.navigate(normalize_url(config.start_url))
 
     def close(self) -> None:
+        self._set_fullscreen_topmost(False)
+        if self.process.poll() is None:
+            try:
+                self.connection.call("Browser.close", timeout=2.0)
+            except Exception as exc:
+                LOGGER.debug("Could not close Chromium through CDP: %s", exc)
+                try:
+                    self.process.wait(timeout=2.0)
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
+            else:
+                try:
+                    self.process.wait(timeout=4.0)
+                    return
+                except subprocess.TimeoutExpired:
+                    LOGGER.debug("Chromium did not exit after CDP close; terminating")
         try:
             self.connection.close()
         except Exception:
             pass
         if self.process.poll() is None:
             self.process.terminate()
+            try:
+                self.process.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                LOGGER.debug("Chromium did not exit after terminate; killing")
+                self.process.kill()
 
     def navigate(self, url: str) -> dict[str, Any]:
         target = normalize_url(url)
@@ -283,6 +306,7 @@ class ChromiumBrowserService:
 }})()
 """
         value = self.evaluate(script)
+        self.schedule_fullscreen_topmost_refresh()
         return value if isinstance(value, dict) else {"js": value}
 
     def send_key_shortcut(self, action: str) -> bool:
@@ -310,6 +334,8 @@ class ChromiumBrowserService:
                     "unmodifiedText": key.lower(),
                 },
             )
+        if action in {"fullscreen", "exit_fullscreen"}:
+            self.schedule_fullscreen_topmost_refresh()
         return True
 
     def send_special_key(self, key: str) -> bool:
@@ -333,7 +359,43 @@ class ChromiumBrowserService:
                     "nativeVirtualKeyCode": vk,
                 },
             )
+        if key == "Escape":
+            self.schedule_fullscreen_topmost_refresh()
         return True
+
+    def schedule_fullscreen_topmost_refresh(self) -> None:
+        if sys.platform != "win32":
+            return
+        for delay_ms in (120, 420, 900):
+            QTimer.singleShot(delay_ms, self.refresh_fullscreen_topmost)
+
+    def refresh_fullscreen_topmost(self) -> None:
+        fullscreen = self._is_chromium_window_fullscreen()
+        if fullscreen is None:
+            return
+        self._set_fullscreen_topmost(fullscreen)
+
+    def _is_chromium_window_fullscreen(self) -> bool | None:
+        try:
+            window = self.connection.call("Browser.getWindowForTarget")
+            bounds = window.get("bounds") if isinstance(window.get("bounds"), dict) else {}
+            return bounds.get("windowState") == "fullscreen"
+        except Exception as exc:
+            LOGGER.debug("Could not read Chromium window fullscreen state: %s", exc)
+            return None
+
+    def _set_fullscreen_topmost(self, enabled: bool) -> None:
+        if sys.platform != "win32":
+            return
+        if not enabled and not self._fullscreen_topmost:
+            return
+        try:
+            changed = _set_process_windows_topmost(self.process.pid, enabled)
+        except Exception as exc:
+            LOGGER.debug("Could not update Chromium topmost state: %s", exc)
+            return
+        if changed:
+            self._fullscreen_topmost = enabled
 
     def _launch_browser(self, start_url: str) -> subprocess.Popen[Any]:
         args = [
@@ -343,6 +405,8 @@ class ChromiumBrowserService:
             "--remote-allow-origins=*",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-session-crashed-bubble",
+            "--hide-crash-restore-bubble",
             "--disable-popup-blocking",
             "--autoplay-policy=no-user-gesture-required",
             "--window-size=1280,800",
@@ -786,6 +850,8 @@ return remoteExplorerRunMediaAction(media, action, amount);
                 value["controlled"] = True
                 value["media_reason"] = "keyboard_shortcut"
                 value["media_action"] = action
+        if action in {"fullscreen", "exit_fullscreen"}:
+            self.browser.schedule_fullscreen_topmost_refresh()
         respond(_ok(_normalize_js_result(value)))
 
     def _close_page(self, payload: dict[str, Any], respond: Any) -> None:
@@ -882,6 +948,67 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _set_process_windows_topmost(process_id: int, enabled: bool) -> int:
+    if sys.platform != "win32":
+        return 0
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    enum_windows_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    user32.EnumWindows.argtypes = [enum_windows_proc, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindow.restype = wintypes.HWND
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.SetWindowPos.argtypes = [
+        wintypes.HWND,
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    user32.SetWindowPos.restype = wintypes.BOOL
+
+    GW_OWNER = 4
+    HWND_TOPMOST = wintypes.HWND(-1)
+    HWND_NOTOPMOST = wintypes.HWND(-2)
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    SWP_NOACTIVATE = 0x0010
+    SWP_SHOWWINDOW = 0x0040
+    flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+    insert_after = HWND_TOPMOST if enabled else HWND_NOTOPMOST
+    handles: list[wintypes.HWND] = []
+
+    @enum_windows_proc
+    def collect_window(hwnd: wintypes.HWND, lparam: wintypes.LPARAM) -> int:
+        del lparam
+        owner_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+        if owner_pid.value == process_id and user32.IsWindowVisible(hwnd) and not user32.GetWindow(hwnd, GW_OWNER):
+            handles.append(hwnd)
+        return 1
+
+    if not user32.EnumWindows(collect_window, 0):
+        last_error = ctypes.get_last_error()
+        if last_error:
+            raise ctypes.WinError(last_error)
+
+    changed = 0
+    for hwnd in handles:
+        if user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags):
+            changed += 1
+    return changed
 
 
 def json_string(value: str) -> str:
