@@ -31,7 +31,7 @@ jobs:
         run: python -m pytest
 
   package:
-    name: Package ${{ matrix.os }}
+    name: Package ${{ matrix.artifact-name }}
     needs: test
     strategy:
       fail-fast: false
@@ -39,13 +39,44 @@ jobs:
         include:
           - os: windows-latest
             artifact-name: remote-explorer-server-windows
-            executable: dist/remote-explorer-server.exe
+            artifact-path: dist/remote-explorer-server.exe
+            smoke-path: dist/remote-explorer-server.exe
+            python-version: "3.11"
+            pyinstaller-target-arch: ""
+            macos-deployment-target: ""
+            legacy-catalina: false
           - os: macos-latest
-            artifact-name: remote-explorer-server-macos
-            executable: dist/remote-explorer-server
+            artifact-name: remote-explorer-server-macos-arm64
+            artifact-path: dist/remote-explorer-server-macos-arm64.zip
+            smoke-path: dist/Remote Explorer Server.app
+            python-version: "3.11"
+            pyinstaller-target-arch: arm64
+            macos-deployment-target: "11.0"
+            legacy-catalina: false
+          - os: macos-15-intel
+            artifact-name: remote-explorer-server-macos-x86_64
+            artifact-path: dist/remote-explorer-server-macos-x86_64.zip
+            smoke-path: dist/Remote Explorer Server.app
+            python-version: "3.11"
+            pyinstaller-target-arch: x86_64
+            macos-deployment-target: "11.0"
+            legacy-catalina: false
+          - os: macos-13
+            artifact-name: remote-explorer-server-macos-catalina-x86_64
+            artifact-path: dist/remote-explorer-server-macos-catalina-x86_64.zip
+            smoke-path: dist/Remote Explorer Server.app
+            python-version: "3.10"
+            pyinstaller-target-arch: x86_64
+            macos-deployment-target: "10.15"
+            legacy-catalina: true
           - os: ubuntu-latest
             artifact-name: remote-explorer-server-linux
-            executable: dist/remote-explorer-server
+            artifact-path: dist/remote-explorer-server
+            smoke-path: dist/remote-explorer-server
+            python-version: "3.11"
+            pyinstaller-target-arch: ""
+            macos-deployment-target: ""
+            legacy-catalina: false
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -54,21 +85,40 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install package dependencies
+        if: ${{ matrix['legacy-catalina'] != true }}
         run: python -m pip install -e ".[server]" pyinstaller
+
+      - name: Install macOS Catalina package dependencies
+        if: ${{ matrix['legacy-catalina'] == true }}
+        run: python -m pip install -e . -r requirements-macos-catalina.txt
 
       - name: Build executable
         run: pyinstaller --clean --noconfirm main.spec
+        env:
+          PYINSTALLER_TARGET_ARCH: ${{ matrix.pyinstaller-target-arch }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos-deployment-target }}
 
       - name: Smoke test artifact path
         shell: bash
-        run: test -f "${{ matrix.executable }}"
+        run: test -e "${{ matrix.smoke-path }}"
 
-      - name: Upload executable
+      - name: Verify macOS minimum version
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          actual="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' 'dist/Remote Explorer Server.app/Contents/Info.plist')"
+          test "$actual" = "${{ matrix.macos-deployment-target }}"
+
+      - name: Package macOS app bundle
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Remote Explorer Server.app" "${{ matrix.artifact-path }}"
+
+      - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact-name }}
-          path: ${{ matrix.executable }}
+          path: ${{ matrix.artifact-path }}

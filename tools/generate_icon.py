@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import binascii
 import struct
+import zlib
 from pathlib import Path
 
 
-SIZES = (16, 32, 48, 64, 128, 256)
+ICO_SIZES = (16, 32, 48, 64, 128, 256)
+ICNS_SIZES = (
+    ("ic04", 16),
+    ("ic05", 32),
+    ("ic07", 128),
+    ("ic08", 256),
+    ("ic09", 512),
+    ("ic10", 1024),
+)
 
 
 def _inside_rounded_rect(x: float, y: float, left: float, top: float, right: float, bottom: float, radius: float) -> bool:
@@ -96,11 +106,32 @@ def _dib(size: int) -> bytes:
     return header + bytes(pixels) + mask
 
 
-def write_icon(path: Path) -> None:
-    images = [_dib(size) for size in SIZES]
+def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    crc = binascii.crc32(chunk_type)
+    crc = binascii.crc32(data, crc) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", crc)
+
+
+def _png(size: int) -> bytes:
+    rows = bytearray()
+    for y in range(size):
+        rows.append(0)
+        for x in range(size):
+            rows.extend(_pixel(size, x, y))
+    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(rows), level=9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def write_ico(path: Path) -> None:
+    images = [_dib(size) for size in ICO_SIZES]
     offset = 6 + 16 * len(images)
     entries = bytearray()
-    for size, image in zip(SIZES, images):
+    for size, image in zip(ICO_SIZES, images):
         entries.extend(
             struct.pack(
                 "<BBBBHHII",
@@ -120,5 +151,19 @@ def write_icon(path: Path) -> None:
     path.write_bytes(struct.pack("<HHH", 0, 1, len(images)) + bytes(entries) + b"".join(images))
 
 
+def write_icns(path: Path) -> None:
+    chunks = bytearray()
+    for icon_type, size in ICNS_SIZES:
+        image = _png(size)
+        chunks.extend(icon_type.encode("ascii"))
+        chunks.extend(struct.pack(">I", len(image) + 8))
+        chunks.extend(image)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"icns" + struct.pack(">I", len(chunks) + 8) + bytes(chunks))
+
+
 if __name__ == "__main__":
-    write_icon(Path(__file__).resolve().parents[1] / "assets" / "remote-explorer.ico")
+    assets_dir = Path(__file__).resolve().parents[1] / "assets"
+    write_ico(assets_dir / "remote-explorer.ico")
+    write_icns(assets_dir / "remote-explorer.icns")

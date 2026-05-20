@@ -100,6 +100,26 @@ python tools/dev_client.py navigate --host 127.0.0.1 https://example.com
 
 Both can be changed with command-line flags.
 
+## Packaging
+
+Server packages are built by `.github/workflows/package-server.yml`.
+
+- Windows uploads `remote-explorer-server.exe`.
+- macOS uploads `Remote Explorer Server.app` as a zip, so double-clicking opens
+  a normal macOS app bundle instead of a terminal-style command executable.
+- macOS builds are split into `macos-arm64` for Apple Silicon and
+  `macos-x86_64` for Intel Macs. The Intel build sets
+  `MACOSX_DEPLOYMENT_TARGET=11.0`.
+- `remote-explorer-server-macos-catalina-x86_64` is a separate legacy Intel
+  package for macOS 10.15. It uses Python 3.10 and
+  `requirements-macos-catalina.txt` so older Qt/PySide dependencies do not
+  affect the normal macOS, Windows, or Linux packages.
+- Linux uploads the `remote-explorer-server` executable.
+
+With the current default PySide6 dependency, macOS 11 is the intended minimum
+for normal packaged macOS apps. Use the Catalina artifact only when macOS 10.15
+support is required.
+
 ## Documentation
 
 - [Project plan](docs/PROJECT_PLAN.md)
