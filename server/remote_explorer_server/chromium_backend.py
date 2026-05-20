@@ -27,8 +27,10 @@ from .config import ServerConfig
 from .protocol import normalize_url
 from .streaming_protocol import (
     DEFAULT_JPEG_QUALITY,
+    MAX_STREAM_CHUNKS_PER_FRAME,
     DEFAULT_STREAM_FPS,
     MAX_STREAM_FPS,
+    MIN_JPEG_QUALITY,
     MIN_STREAM_FPS,
     STREAM_CHUNK_BYTES,
     STREAM_CHUNK_PACE_BATCH,
@@ -235,20 +237,38 @@ class ChromiumBrowserService:
         self.viewport_height = max(1, int(height))
 
     def capture_jpeg(self, quality: int) -> bytes:
-        result = self.connection.call(
+        try:
+            result = self._capture_jpeg_result(quality)
+        except CdpError as exc:
+            if "Not attached to an active page" not in str(exc):
+                raise
+            LOGGER.info("Chromium page target detached during capture; reconnecting CDP page")
+            self._reconnect_page()
+            result = self._capture_jpeg_result(quality)
+        encoded = result.get("data")
+        if not isinstance(encoded, str) or not encoded:
+            raise CdpError("captureScreenshot returned no data")
+        return base64.b64decode(encoded)
+
+    def _capture_jpeg_result(self, quality: int) -> dict[str, Any]:
+        return self.connection.call(
             "Page.captureScreenshot",
             {
                 "format": "jpeg",
-                "quality": clamp_int(quality, 30, 90, DEFAULT_JPEG_QUALITY),
+                "quality": clamp_int(quality, MIN_JPEG_QUALITY, 90, DEFAULT_JPEG_QUALITY),
                 "fromSurface": True,
                 "captureBeyondViewport": False,
             },
             timeout=10.0,
         )
-        encoded = result.get("data")
-        if not isinstance(encoded, str) or not encoded:
-            raise CdpError("captureScreenshot returned no data")
-        return base64.b64decode(encoded)
+
+    def _reconnect_page(self) -> None:
+        try:
+            self.connection.close()
+        except Exception:
+            pass
+        self.connection = self._connect()
+        self._configure_page()
 
     def evaluate(self, script: str) -> Any:
         result = self.connection.call(
@@ -647,11 +667,11 @@ class ChromiumStreamService(QObject):
         if frame_image.isNull():
             return
 
-        frame_width = max(1, frame_image.width())
-        frame_height = max(1, frame_image.height())
-        jpeg = _encode_jpeg(frame_image, config.quality)
+        frame_image, jpeg = _encode_jpeg_for_udp(frame_image, config.quality)
         if not jpeg:
             return
+        frame_width = max(1, frame_image.width())
+        frame_height = max(1, frame_image.height())
 
         chunk_count = int(math.ceil(len(jpeg) / STREAM_CHUNK_BYTES))
         if chunk_count <= 0 or chunk_count > 65535:
@@ -1063,11 +1083,38 @@ def _encode_jpeg(image: QImage, quality: int) -> bytes:
     buffer = QBuffer(byte_array)
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     try:
-        if not image.save(buffer, "JPG", clamp_int(quality, 30, 90, DEFAULT_JPEG_QUALITY)):
+        if not image.save(buffer, "JPG", clamp_int(quality, MIN_JPEG_QUALITY, 90, DEFAULT_JPEG_QUALITY)):
             return b""
         return bytes(byte_array)
     finally:
         buffer.close()
+
+
+def _encode_jpeg_for_udp(image: QImage, quality: int) -> tuple[QImage, bytes]:
+    target_bytes = STREAM_CHUNK_BYTES * MAX_STREAM_CHUNKS_PER_FRAME
+    current = image
+    for scale_attempt in range(4):
+        for candidate_quality in (quality, 48, 42, 36, MIN_JPEG_QUALITY):
+            jpeg = _encode_jpeg(current, candidate_quality)
+            if not jpeg:
+                continue
+            if len(jpeg) <= target_bytes or (scale_attempt == 3 and candidate_quality == MIN_JPEG_QUALITY):
+                return current, jpeg
+
+        next_width = max(320, int(current.width() * 0.85))
+        next_height = max(180, int(current.height() * 0.85))
+        if next_width >= current.width() and next_height >= current.height():
+            break
+        scaled = current.scaled(
+            QSize(next_width, next_height),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        if scaled.isNull():
+            break
+        current = scaled
+
+    return current, _encode_jpeg(current, MIN_JPEG_QUALITY)
 
 
 def _normalize_js_result(value: Any) -> dict[str, Any]:

@@ -54,7 +54,7 @@ namespace RemoteExplorer
         private const int StreamHeaderBytes = 24;
         private const int StreamChunkBytes = 1000;
         private const int MaxStreamChunks = 512;
-        private const int StreamReceiveBufferBytes = 2 * 1024 * 1024;
+        private const int StreamReceiveBufferBytes = 8 * 1024 * 1024;
         private const int MaxReceiveBurstPackets = 256;
         private const int SioUdpConnectionReset = -1744830452;
         private const double StreamStatsIntervalSeconds = 5.0;

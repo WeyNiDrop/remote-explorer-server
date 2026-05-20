@@ -19,13 +19,15 @@ STREAM_MAGIC = b"REXPSTR1"
 STREAM_HEADER_FORMAT = "!8sIHHHHHH"
 STREAM_HEADER_SIZE = struct.calcsize(STREAM_HEADER_FORMAT)
 STREAM_CHUNK_BYTES = 1000
+MAX_STREAM_CHUNKS_PER_FRAME = 64
 # 大帧分片发送削峰，避免 UDP 突发压垮客户端缓冲。 / Pace large frame chunks to avoid UDP bursts.
-STREAM_CHUNK_PACE_BATCH = 16
-STREAM_CHUNK_PACE_SECONDS = 0.001
+STREAM_CHUNK_PACE_BATCH = 8
+STREAM_CHUNK_PACE_SECONDS = 0.0015
 DEFAULT_STREAM_FPS = 30
 MIN_STREAM_FPS = 20
 MAX_STREAM_FPS = 60
 DEFAULT_JPEG_QUALITY = 55
+MIN_JPEG_QUALITY = 30
 MAX_STREAM_HEIGHT = 1080
 MAX_STREAM_WIDTH = 1920
 STREAM_LOG_INTERVAL_SECONDS = 5.0
@@ -235,11 +237,13 @@ class BrowserStreamService(QObject):
         frame_id: int,
     ) -> None:
         encode_started_at = time.perf_counter()
-        jpeg = _encode_jpeg(image, config.quality)
+        image, jpeg = _encode_jpeg_for_udp(image, config.quality)
         encode_ms = (time.perf_counter() - encode_started_at) * 1000.0
         if not jpeg:
             self._record_skip("encode_failed")
             return
+        frame_width = max(1, image.width())
+        frame_height = max(1, image.height())
 
         chunk_count = int(math.ceil(len(jpeg) / STREAM_CHUNK_BYTES))
         if chunk_count <= 0 or chunk_count > 65535:
@@ -424,11 +428,38 @@ def _encode_jpeg(image: QImage, quality: int) -> bytes:
     buffer = QBuffer(byte_array)
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     try:
-        if not image.save(buffer, "JPG", quality):
+        if not image.save(buffer, "JPG", _clamp_int(quality, MIN_JPEG_QUALITY, 90, DEFAULT_JPEG_QUALITY)):
             return b""
         return bytes(byte_array)
     finally:
         buffer.close()
+
+
+def _encode_jpeg_for_udp(image: QImage, quality: int) -> tuple[QImage, bytes]:
+    target_bytes = STREAM_CHUNK_BYTES * MAX_STREAM_CHUNKS_PER_FRAME
+    current = image
+    for scale_attempt in range(4):
+        for candidate_quality in (quality, 48, 42, 36, MIN_JPEG_QUALITY):
+            jpeg = _encode_jpeg(current, candidate_quality)
+            if not jpeg:
+                continue
+            if len(jpeg) <= target_bytes or (scale_attempt == 3 and candidate_quality == MIN_JPEG_QUALITY):
+                return current, jpeg
+
+        next_width = max(320, int(current.width() * 0.85))
+        next_height = max(180, int(current.height() * 0.85))
+        if next_width >= current.width() and next_height >= current.height():
+            break
+        scaled = current.scaled(
+            QSize(next_width, next_height),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        if scaled.isNull():
+            break
+        current = scaled
+
+    return current, _encode_jpeg(current, MIN_JPEG_QUALITY)
 
 
 def _resolve_size(payload: dict[str, Any]) -> tuple[int, int, str]:
