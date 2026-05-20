@@ -21,11 +21,11 @@ from PySide6.QtGui import QImage
 from PySide6.QtNetwork import QHostAddress
 from PySide6.QtWidgets import QLabel, QLineEdit, QMainWindow, QToolBar, QVBoxLayout, QWidget
 
-from .browser import CHROME_COMPAT_ACCEPT_LANGUAGE, CHROME_COMPAT_USER_AGENT, MEDIA_CONTROL_HELPERS, REMOTE_INPUT_HELPERS
+from .browser_scripts import CHROME_COMPAT_ACCEPT_LANGUAGE, CHROME_COMPAT_USER_AGENT, MEDIA_CONTROL_HELPERS, REMOTE_INPUT_HELPERS
 from .cdp import CdpConnection, CdpError, http_json
 from .config import ServerConfig
 from .protocol import normalize_url
-from .streaming import (
+from .streaming_protocol import (
     DEFAULT_JPEG_QUALITY,
     DEFAULT_STREAM_FPS,
     MAX_STREAM_FPS,
@@ -35,9 +35,9 @@ from .streaming import (
     STREAM_CHUNK_PACE_SECONDS,
     STREAM_HEADER_FORMAT,
     STREAM_MAGIC,
-    _clamp_int,
-    _clean_host,
-    _resolve_size,
+    clamp_int,
+    clean_host,
+    resolve_size,
 )
 
 LOGGER = logging.getLogger("remote_explorer.chromium")
@@ -194,7 +194,7 @@ class ChromiumBrowserService:
             "Page.captureScreenshot",
             {
                 "format": "jpeg",
-                "quality": _clamp_int(quality, 30, 90, DEFAULT_JPEG_QUALITY),
+                "quality": clamp_int(quality, 30, 90, DEFAULT_JPEG_QUALITY),
                 "fromSurface": True,
                 "captureBeyondViewport": False,
             },
@@ -445,15 +445,15 @@ class ChromiumStreamService(QObject):
         self.last_stats_at = time.monotonic()
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
-        host = _clean_host(str(payload.get("_source_host") or payload.get("host") or ""))
+        host = clean_host(str(payload.get("_source_host") or payload.get("host") or ""))
         port = int(payload.get("port") or payload.get("stream_port") or 0)
         if not host:
             raise ValueError("Stream host is required")
         if port <= 0 or port > 65535:
             raise ValueError("Valid stream port is required")
-        width, height, resolution = _resolve_size(payload)
-        fps = _clamp_int(payload.get("fps"), MIN_STREAM_FPS, MAX_STREAM_FPS, DEFAULT_STREAM_FPS)
-        quality = _clamp_int(payload.get("quality"), 30, 90, DEFAULT_JPEG_QUALITY)
+        width, height, resolution = resolve_size(payload)
+        fps = clamp_int(payload.get("fps"), MIN_STREAM_FPS, MAX_STREAM_FPS, DEFAULT_STREAM_FPS)
+        quality = clamp_int(payload.get("quality"), 30, 90, DEFAULT_JPEG_QUALITY)
         self.config = ChromiumStreamConfig(host, port, width, height, fps, quality, resolution)
         self.target_host = QHostAddress(host)
         self.target_address = host
@@ -901,7 +901,7 @@ def _encode_jpeg(image: QImage, quality: int) -> bytes:
     buffer = QBuffer(byte_array)
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     try:
-        if not image.save(buffer, "JPG", _clamp_int(quality, 30, 90, DEFAULT_JPEG_QUALITY)):
+        if not image.save(buffer, "JPG", clamp_int(quality, 30, 90, DEFAULT_JPEG_QUALITY)):
             return b""
         return bytes(byte_array)
     finally:

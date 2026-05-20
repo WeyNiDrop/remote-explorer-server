@@ -7,7 +7,6 @@ import logging.handlers
 import os
 import queue
 import sys
-from importlib import import_module
 from pathlib import Path
 
 from .config import (
@@ -61,9 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-url", default=str(saved.get("start_url") or "about:blank"))
     parser.add_argument(
         "--browser-engine",
-        choices=["auto", "chromium", "qt"],
+        choices=["auto", "chromium"],
         default=os.environ.get("REMOTE_EXPLORER_BROWSER_ENGINE", str(saved.get("browser_engine") or "auto")),
-        help="Browser backend. auto prefers system Chromium/Chrome/Edge and falls back to Qt WebEngine.",
+        help="Browser backend. auto uses system Chromium, Chrome, or Edge.",
     )
     parser.add_argument(
         "--browser-executable",
@@ -168,12 +167,9 @@ def create_browser_window(
         try:
             return chromium_window_type(config)
         except chromium_unavailable_type as exc:
-            logging.getLogger("remote_explorer.main").warning(
-                "Chromium browser engine unavailable, falling back to Qt WebEngine: %s",
-                exc,
-            )
-    browser_module = import_module(".browser", __package__)
-    return browser_module.BrowserWindow(config)
+            logging.getLogger("remote_explorer.main").error("Chromium browser engine unavailable: %s", exc)
+            raise
+    raise chromium_unavailable_type(f"Unsupported browser engine: {config.browser_engine}")
 
 
 if __name__ == "__main__":
