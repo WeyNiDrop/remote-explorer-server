@@ -232,14 +232,14 @@ MEDIA_CONTROL_HELPERS = r"""
       "record",
       "recording",
       "permission",
-      "璇煶",
-      "瑾為煶",
-      "楹﹀厠椋?,
-      "楹ュ厠棰?,
-      "鎼滅储",
-      "鎼滃皨",
-      "褰曢煶",
-      "閷勯煶"
+      "语音",
+      "語音",
+      "麦克风",
+      "麥克風",
+      "搜索",
+      "搜尋",
+      "录音",
+      "錄音"
     ].some(keyword => text.includes(keyword))) {
       return true;
     }
