@@ -403,28 +403,30 @@ class ChromiumBrowserService:
 
     def send_key_shortcut(self, action: str) -> bool:
         shortcuts = {
-            "fullscreen": ("f", "KeyF", 70, 0),
-            "exit_fullscreen": ("Escape", "Escape", 27, 0),
-            "next": ("N", "KeyN", 78, 8),
-            "previous": ("P", "KeyP", 80, 8),
+            "fullscreen": ("f", "KeyF", 70, 3, 0),
+            "exit_fullscreen": ("Escape", "Escape", 27, 53, 0),
+            "next": ("N", "KeyN", 78, 45, 8),
+            "previous": ("P", "KeyP", 80, 35, 8),
         }
         shortcut = shortcuts.get(action)
         if not shortcut:
             return False
-        key, code, vk, modifiers = shortcut
+        key, code, vk, mac_vk, modifiers = shortcut
         for event_type in ("keyDown", "keyUp"):
+            payload: dict[str, Any] = {
+                "type": event_type,
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+                "nativeVirtualKeyCode": mac_vk if sys.platform == "darwin" else vk,
+                "modifiers": modifiers,
+            }
+            if len(key) == 1 and event_type == "keyDown":
+                payload["text"] = key
+                payload["unmodifiedText"] = key.lower()
             self.connection.call(
                 "Input.dispatchKeyEvent",
-                {
-                    "type": event_type,
-                    "key": key,
-                    "code": code,
-                    "windowsVirtualKeyCode": vk,
-                    "nativeVirtualKeyCode": vk,
-                    "modifiers": modifiers,
-                    "text": key if event_type == "keyDown" else "",
-                    "unmodifiedText": key.lower(),
-                },
+                payload,
             )
         if action in {"fullscreen", "exit_fullscreen"}:
             self.schedule_fullscreen_topmost_refresh()

@@ -39,6 +39,16 @@ class FakeLogFile:
         self.closed = True
 
 
+class FakeCdpConnection:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def call(self, method, payload=None, timeout=None):
+        del timeout
+        self.calls.append((method, payload or {}))
+        return {}
+
+
 @unittest.skipIf(ChromiumBrowserService is None, "PySide6 is not installed")
 class ChromiumBrowserServiceTests(unittest.TestCase):
     def test_close_without_connection_after_connect_failure(self) -> None:
@@ -83,6 +93,33 @@ class ChromiumBrowserServiceTests(unittest.TestCase):
 
         self.assertTrue(process.terminated)
         self.assertTrue(log_file.closed)
+
+    def test_macos_escape_shortcut_does_not_send_text_parameter(self) -> None:
+        service = ChromiumBrowserService.__new__(ChromiumBrowserService)
+        service.connection = FakeCdpConnection()
+        service._fullscreen_topmost = False
+        with patch.object(chromium_backend.sys, "platform", "darwin"):
+            self.assertTrue(service.send_key_shortcut("exit_fullscreen"))
+
+        payloads = [payload for method, payload in service.connection.calls if method == "Input.dispatchKeyEvent"]
+        self.assertEqual(len(payloads), 2)
+        self.assertEqual(payloads[0]["nativeVirtualKeyCode"], 53)
+        self.assertNotIn("text", payloads[0])
+        self.assertNotIn("text", payloads[1])
+
+    def test_macos_fullscreen_shortcut_uses_platform_native_key_code(self) -> None:
+        service = ChromiumBrowserService.__new__(ChromiumBrowserService)
+        service.connection = FakeCdpConnection()
+        service._fullscreen_topmost = False
+        with patch.object(chromium_backend.sys, "platform", "darwin"):
+            self.assertTrue(service.send_key_shortcut("fullscreen"))
+
+        payloads = [payload for method, payload in service.connection.calls if method == "Input.dispatchKeyEvent"]
+        self.assertEqual(payloads[0]["key"], "f")
+        self.assertEqual(payloads[0]["windowsVirtualKeyCode"], 70)
+        self.assertEqual(payloads[0]["nativeVirtualKeyCode"], 3)
+        self.assertEqual(payloads[0]["text"], "f")
+        self.assertNotIn("text", payloads[1])
 
 
 if __name__ == "__main__":

@@ -342,7 +342,10 @@ MEDIA_CONTROL_HELPERS = r"""
       }
     } else if (action === "fullscreen") {
       controlled = remoteExplorerClickButton(remoteExplorerFindButton(media, [["fullscreen"], ["full", "screen"]]));
-      reason = controlled ? "" : "keyboard_shortcut_required";
+      if (!controlled) {
+        controlled = remoteExplorerRequestFullscreen(media);
+        reason = controlled ? "dom_fullscreen" : "keyboard_shortcut_required";
+      }
     } else if (action === "exit_fullscreen") {
       controlled = remoteExplorerExitFullscreen();
       reason = controlled ? "" : "keyboard_shortcut_required";
