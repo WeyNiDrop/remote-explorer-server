@@ -292,7 +292,7 @@ class ChromiumBrowserService:
         payload: dict[str, Any] = {
             "format": "jpeg",
             "quality": clamp_int(quality, MIN_JPEG_QUALITY, 90, DEFAULT_JPEG_QUALITY),
-            "fromSurface": True,
+            "fromSurface": sys.platform != "darwin",
             "captureBeyondViewport": False,
         }
         if self._stream_viewport is not None and sys.platform == "darwin":

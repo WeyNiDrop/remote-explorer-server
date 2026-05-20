@@ -570,9 +570,15 @@ namespace RemoteExplorer
         public async Task<CommandEnvelope> BrowserCommandAsync(
             string command,
             CancellationToken cancellationToken = default,
-            float timeoutSeconds = DefaultControlTimeoutSeconds)
+            float timeoutSeconds = DefaultControlTimeoutSeconds,
+            bool markConnectionLostOnFailure = true)
         {
-            return await SendCommandAsync(command, new Dictionary<string, object>(), cancellationToken, timeoutSeconds);
+            return await SendCommandAsync(
+                command,
+                new Dictionary<string, object>(),
+                cancellationToken,
+                timeoutSeconds,
+                markConnectionLostOnFailure);
         }
 
         public async Task<CommandEnvelope> WebRtcOfferAsync(
@@ -613,7 +619,8 @@ namespace RemoteExplorer
             string command,
             Dictionary<string, object> payload,
             CancellationToken cancellationToken = default,
-            float timeoutSeconds = DefaultControlTimeoutSeconds)
+            float timeoutSeconds = DefaultControlTimeoutSeconds,
+            bool markConnectionLostOnFailure = true)
         {
             if (!IsConnected)
             {
@@ -643,7 +650,7 @@ namespace RemoteExplorer
             try
             {
                 var result = await SendRequestAsync<CommandEnvelope>(message, cancellationToken, timeoutSeconds);
-                if (IsConnectionInvalidError(result))
+                if (markConnectionLostOnFailure && IsConnectionInvalidError(result))
                 {
                     MarkConnectionLost(result.error.message);
                 }
@@ -652,9 +659,17 @@ namespace RemoteExplorer
             }
             catch (Exception ex) when (IsConnectionFailure(ex, cancellationToken))
             {
-                MarkConnectionLost(ex.Message);
+                if (markConnectionLostOnFailure)
+                {
+                    MarkConnectionLost(ex.Message);
+                }
                 throw;
             }
+        }
+
+        public void MarkConnectionLostFromHealthCheck(string reason)
+        {
+            MarkConnectionLost(reason);
         }
 
         public void Disconnect()

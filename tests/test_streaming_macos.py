@@ -344,6 +344,7 @@ class MacChromiumStreamTests(unittest.TestCase):
             ChromiumBrowserService._capture_jpeg_result(browser, 55)
 
         self.assertEqual(browser.connection.calls[-1][0], "Page.captureScreenshot")
+        self.assertFalse(browser.connection.calls[-1][1]["fromSurface"])
         self.assertEqual(
             browser.connection.calls[-1][1]["clip"],
             {"x": 0, "y": 0, "width": 1280, "height": 720, "scale": 1},
@@ -361,6 +362,7 @@ class MacChromiumStreamTests(unittest.TestCase):
             ChromiumBrowserService._capture_jpeg_result(browser, 55)
 
         self.assertEqual(browser.connection.calls[-1][0], "Page.captureScreenshot")
+        self.assertTrue(browser.connection.calls[-1][1]["fromSurface"])
         self.assertNotIn("clip", browser.connection.calls[-1][1])
 
     def test_chromium_reconnect_restores_active_stream_viewport(self) -> None:

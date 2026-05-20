@@ -28,7 +28,8 @@ namespace RemoteExplorer
         private const float StreamRestartCooldownSeconds = 12f;
         private const float StreamRenderLogIntervalSeconds = 5f;
         private const float ConnectionHealthIntervalSeconds = 5f;
-        private const float ConnectionHealthTimeoutSeconds = 1.5f;
+        private const float ConnectionHealthTimeoutSeconds = 4f;
+        private const int ConnectionHealthMaxFailures = 3;
         private const int StreamStatusLogLimit = 80;
 
         private readonly RemoteExplorerClient client = new RemoteExplorerClient();
@@ -135,6 +136,7 @@ namespace RemoteExplorer
         private bool remoteInputCommitInFlight;
         private bool remoteKeyboardFlushInFlight;
         private bool connectionHealthCheckInFlight;
+        private int connectionHealthFailures;
         private int remoteInputVersion;
         private float nextConnectionHealthCheckAt = -1f;
         private bool canvasReady;
@@ -900,6 +902,7 @@ namespace RemoteExplorer
                 UpsertSavedServerFromConnection(server, password);
                 settings.Save();
                 SetCommandButtons(true);
+                ResetConnectionHealth();
                 SetStatus("已连接: " + server);
                 ShowRemotePage();
                 FireAndForget(StartStreamAsync);
@@ -929,6 +932,7 @@ namespace RemoteExplorer
                 settings.ServerPort = server.ControlPort;
                 settings.Save();
                 SetCommandButtons(client.IsConnected);
+                ResetConnectionHealth();
                 SetStatus("Connected: " + server);
                 ShowRemotePage();
                 FireAndForget(StartStreamAsync);
@@ -1363,6 +1367,7 @@ namespace RemoteExplorer
             streamStartInFlight = false;
             streamSettingsDirty = false;
             connectionHealthCheckInFlight = false;
+            connectionHealthFailures = 0;
             nextConnectionHealthCheckAt = -1f;
             hasActiveStreamMode = false;
             lastStreamFrameAt = -1f;
@@ -1419,6 +1424,13 @@ namespace RemoteExplorer
                 return;
             }
 
+            if (IsStreamActive() && lastStreamFrameAt > 0f && Time.unscaledTime - lastStreamFrameAt < ConnectionHealthIntervalSeconds * 2f)
+            {
+                connectionHealthFailures = 0;
+                nextConnectionHealthCheckAt = Time.unscaledTime + ConnectionHealthIntervalSeconds;
+                return;
+            }
+
             connectionHealthCheckInFlight = true;
             nextConnectionHealthCheckAt = Time.unscaledTime + ConnectionHealthIntervalSeconds;
             FireAndForget(CheckConnectionHealthAsync);
@@ -1428,19 +1440,38 @@ namespace RemoteExplorer
         {
             try
             {
-                await client.BrowserCommandAsync("status", lifetime.Token, ConnectionHealthTimeoutSeconds);
+                await client.BrowserCommandAsync(
+                    "status",
+                    lifetime.Token,
+                    ConnectionHealthTimeoutSeconds,
+                    false);
+                connectionHealthFailures = 0;
             }
             catch (Exception ex)
             {
                 if (client.IsConnected)
                 {
+                    connectionHealthFailures++;
+                    RemoteExplorerDiagnostics.Info(
+                        $"Connection health check failed count={connectionHealthFailures}/{ConnectionHealthMaxFailures}: {ex.Message}");
                     Debug.LogWarning("[RemoteExplorer] Connection health check failed: " + ex.Message);
+                    if (connectionHealthFailures >= ConnectionHealthMaxFailures)
+                    {
+                        client.MarkConnectionLostFromHealthCheck(ex.Message);
+                    }
                 }
             }
             finally
             {
                 connectionHealthCheckInFlight = false;
             }
+        }
+
+        private void ResetConnectionHealth()
+        {
+            connectionHealthCheckInFlight = false;
+            connectionHealthFailures = 0;
+            nextConnectionHealthCheckAt = Time.unscaledTime + ConnectionHealthIntervalSeconds;
         }
 
         private void HideModal(GameObject modal)
