@@ -1,5 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
+
+
+icon_path = 'assets/remote-explorer.ico' if sys.platform.startswith('win') else None
 
 a = Analysis(
     ['app.py'],
@@ -42,4 +46,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=icon_path,
 )
