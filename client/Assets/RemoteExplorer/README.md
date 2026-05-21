@@ -20,3 +20,20 @@ Important files:
 - `Scripts/RemoteExplorerClient.cs`: UDP protocol/auth/control client.
 - `Scripts/RemoteExplorerApp.cs`: runtime UI and app flow.
 - `Scripts/RemoteExplorerProtocol.cs`: JSON, signing, and protocol helpers.
+
+## Mobile permissions
+
+The current client only needs network access for LAN discovery, UDP control/stream
+traffic, and WebRTC playback. It does not use camera, microphone, location,
+photos, contacts, or storage permissions.
+
+Android uses the custom main manifest in `Assets/Plugins/Android` to declare:
+
+- internet access
+- network and Wi-Fi state access
+- Wi-Fi multicast state changes for LAN discovery traffic
+
+iOS build postprocessing adds the local-network usage description and the
+multicast networking entitlement required by the UDP broadcast discovery path.
+The multicast entitlement must be enabled for the app's Apple signing profile
+before the Xcode build can use automatic LAN discovery on iPhone or iPad.

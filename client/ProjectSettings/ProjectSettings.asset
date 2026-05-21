@@ -299,7 +299,7 @@ PlayerSettings:
   clonedFromGUID: f918f204a65eb664ba9e5b39d533ff8e
   templatePackageId: cn.tuanjie.template.mobile2d@3.0.0
   templateDefaultScene: Assets/Scenes/SampleScene.scene
-  useCustomMainManifest: 0
+  useCustomMainManifest: 1
   useCustomLauncherManifest: 0
   useCustomMainGradleTemplate: 0
   useCustomLauncherGradleManifest: 0
