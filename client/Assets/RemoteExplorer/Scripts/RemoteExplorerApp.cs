@@ -31,6 +31,7 @@ namespace RemoteExplorer
         private const float ConnectionHealthTimeoutSeconds = 4f;
         private const int ConnectionHealthMaxFailures = 3;
         private const int StreamStatusLogLimit = 80;
+        private static readonly Vector2 LandscapeReferenceResolution = new Vector2(1440, 920);
 
         private readonly RemoteExplorerClient client = new RemoteExplorerClient();
         private readonly List<DiscoveredServer> servers = new List<DiscoveredServer>();
@@ -140,6 +141,10 @@ namespace RemoteExplorer
         private int remoteInputVersion;
         private float nextConnectionHealthCheckAt = -1f;
         private bool canvasReady;
+        private RectTransform safeAreaRoot;
+        private Rect appliedSafeArea = new Rect(-1f, -1f, -1f, -1f);
+        private int appliedSafeAreaScreenWidth = -1;
+        private int appliedSafeAreaScreenHeight = -1;
         private string fallbackPassword = string.Empty;
         private string fallbackUrl = "https://www.youtube.com";
         private string currentStatus = "Starting...";
@@ -172,6 +177,7 @@ namespace RemoteExplorer
             instanceId = ++nextInstanceId;
             DontDestroyOnLoad(gameObject);
             RemoteExplorerDiagnostics.Info($"RemoteExplorerApp awake instance={instanceId}");
+            ConfigureLandscapeDisplay();
 
             client.ConnectionLost += HandleConnectionLost;
             lifetime = new CancellationTokenSource();
@@ -217,6 +223,8 @@ namespace RemoteExplorer
 
         private void Update()
         {
+            ApplySafeArea();
+
             RemoteStreamFrame latestFrame = null;
             RemoteStreamFrame frame;
             while (client.TryDequeueStreamFrame(out frame))
@@ -316,14 +324,17 @@ namespace RemoteExplorer
             canvasObject.AddComponent<GraphicRaycaster>();
             var scaler = canvasObject.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = Screen.width >= Screen.height
-                ? new Vector2(1440, 920)
-                : new Vector2(1080, 1920);
+            scaler.referenceResolution = LandscapeReferenceResolution;
             scaler.matchWidthOrHeight = 0.5f;
 
             var root = CreatePanel(canvasObject.transform, "Root", Theme.Background);
             Stretch(root.GetComponent<RectTransform>(), 0, 0, 0, 0);
-            var layout = root.AddComponent<VerticalLayoutGroup>();
+            var safeArea = CreatePanel(root.transform, "Safe Area", new Color(0f, 0f, 0f, 0f));
+            safeAreaRoot = safeArea.GetComponent<RectTransform>();
+            Stretch(safeAreaRoot, 0, 0, 0, 0);
+            ApplySafeArea(true);
+
+            var layout = safeArea.AddComponent<VerticalLayoutGroup>();
             layout.padding = new RectOffset(0, 0, 0, 0);
             layout.spacing = 0;
             layout.childControlWidth = true;
@@ -331,10 +342,10 @@ namespace RemoteExplorer
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = true;
 
-            connectPage = CreatePage(root.transform, "Connect Page", 32, 32, 24);
+            connectPage = CreatePage(safeArea.transform, "Connect Page", 32, 32, 24);
             BuildConnectPage(connectPage.transform);
 
-            remotePage = CreatePage(root.transform, "Remote Page", 32, 32, 24);
+            remotePage = CreatePage(safeArea.transform, "Remote Page", 32, 32, 24);
             BuildRemotePage(remotePage.transform);
             remotePage.SetActive(false);
 
@@ -4085,6 +4096,50 @@ private void RebuildServerDropdown()
             {
                 button.interactable = enabled;
             }
+        }
+
+        private static void ConfigureLandscapeDisplay()
+        {
+            Screen.autorotateToPortrait = false;
+            Screen.autorotateToPortraitUpsideDown = false;
+            Screen.autorotateToLandscapeLeft = true;
+            Screen.autorotateToLandscapeRight = true;
+            Screen.orientation = ScreenOrientation.AutoRotation;
+        }
+
+        private void ApplySafeArea(bool force = false)
+        {
+            if (safeAreaRoot == null || Screen.width <= 0 || Screen.height <= 0)
+            {
+                return;
+            }
+
+            var safeArea = Screen.safeArea;
+            if (safeArea.width <= 0f || safeArea.height <= 0f)
+            {
+                safeArea = new Rect(0f, 0f, Screen.width, Screen.height);
+            }
+
+            if (!force &&
+                safeArea == appliedSafeArea &&
+                Screen.width == appliedSafeAreaScreenWidth &&
+                Screen.height == appliedSafeAreaScreenHeight)
+            {
+                return;
+            }
+
+            safeAreaRoot.anchorMin = new Vector2(
+                Mathf.Clamp01(safeArea.xMin / Screen.width),
+                Mathf.Clamp01(safeArea.yMin / Screen.height));
+            safeAreaRoot.anchorMax = new Vector2(
+                Mathf.Clamp01(safeArea.xMax / Screen.width),
+                Mathf.Clamp01(safeArea.yMax / Screen.height));
+            safeAreaRoot.offsetMin = Vector2.zero;
+            safeAreaRoot.offsetMax = Vector2.zero;
+
+            appliedSafeArea = safeArea;
+            appliedSafeAreaScreenWidth = Screen.width;
+            appliedSafeAreaScreenHeight = Screen.height;
         }
 
         private static void Stretch(RectTransform rect, float left, float right, float top, float bottom)
