@@ -529,12 +529,11 @@ namespace RemoteExplorer
             streamResolutionDropdown.value = 0;
             streamResolutionDropdown.onValueChanged.AddListener(_ => ScheduleStreamSettingsApply());
 
-            remoteInputPanel = CreateCompactRow(parent, "Remote Input Row", 50);
-            remoteInputPanel.GetComponent<LayoutElement>().ignoreLayout = true;
-            remoteTextInput = CreateInput(remoteInputPanel.transform, "Page input", 50, false);
+            remoteInputPanel = CreateRemoteInputPanel(overlayLayer.transform);
+            remoteTextInput = CreateInput(remoteInputPanel.transform, "请输入网页内容", 50, false);
             remoteTextInput.onEndEdit.AddListener(_ => RemoteInputEndEdit());
-            remoteInputDoneButton = CreateCompactButton(remoteInputPanel.transform, "Done", RemoteInputDoneClicked, 110);
-            remoteInputCancelButton = CreateCompactButton(remoteInputPanel.transform, "Cancel", RemoteInputCancelClicked, 130);
+            remoteInputDoneButton = CreateCompactButton(remoteInputPanel.transform, "完成", RemoteInputDoneClicked, 110);
+            remoteInputCancelButton = CreateCompactButton(remoteInputPanel.transform, "取消", RemoteInputCancelClicked, 110);
             remoteInputPanel.SetActive(false);
         }
 
@@ -2424,6 +2423,7 @@ namespace RemoteExplorer
 
             remoteInputVersion++;
             suppressRemoteInputEndEdit = true;
+            remoteInputPanel.transform.SetAsLastSibling();
             remoteInputPanel.SetActive(true);
             remoteTextInput.text = value ?? string.Empty;
             remoteTextInput.caretPosition = remoteTextInput.text.Length;
@@ -3244,6 +3244,28 @@ private void RebuildServerDropdown()
             var panel = CreateUiObject(name, parent);
             var image = panel.AddComponent<Image>();
             image.color = color;
+            return panel;
+        }
+
+        private static GameObject CreateRemoteInputPanel(Transform parent)
+        {
+            var panel = CreateCard(parent, "Remote Input Panel", Theme.Card, 18);
+            Anchor(
+                panel.GetComponent<RectTransform>(),
+                new Vector2(0f, 1f),
+                new Vector2(1f, 1f),
+                new Vector2(0f, -112f),
+                new Vector2(-64f, 82f));
+
+            var layout = panel.AddComponent<HorizontalLayoutGroup>();
+            layout.padding = new RectOffset(16, 16, 16, 16);
+            layout.spacing = 12;
+            layout.childAlignment = TextAnchor.MiddleLeft;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = false;
+            layout.childForceExpandHeight = false;
+
             return panel;
         }
 
