@@ -38,6 +38,11 @@ dist/
 # Local nested Unity project copy; active project root is client/
 client/My project/
 
+# Local mobile export packages
+client/andriod-package/
+client/android-package/
+client/ios-package/
+
 # OS files
 .DS_Store
 Thumbs.db

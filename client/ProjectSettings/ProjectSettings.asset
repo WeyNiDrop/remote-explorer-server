@@ -176,7 +176,7 @@ PlayerSettings:
   tvOSBundleVersion: 1.0
   bundleVersion: 1.0.2
   preloadedAssets:
-  - {fileID: 789679708076066746, guid: ceb34d53dbc8372449da15020127f93a, type: 2}
+  - {fileID: 6208236677356227324, guid: ceb34d53dbc8372449da15020127f93a, type: 2}
   - {fileID: 11400000, guid: 791c2eabfffd0bc46a93ef661cccaa06, type: 2}
   metroInputSource: 0
   wsaTransparentSwapchain: 0
@@ -1017,7 +1017,7 @@ PlayerSettings:
   weixinMiniGameInjectStrippedMethodLogger: 0
   weixinMiniGameEnableDotNetWasmExceptionHandling: 1
   weixinMiniGamePreserveEventDelegate: 0
-  activeSubplatform: 1
+  activeSubplatform: 0
   serializedFileTypeTreeMemoryOptimization: 0
   activeHtmlChannel: -1
   stripBuiltinResources: 0
