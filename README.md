@@ -132,8 +132,9 @@ Both can be changed with command-line flags.
 Server packages are built by `.github/workflows/package-server.yml`.
 
 - Windows uploads `remote-explorer-server.exe`.
-- macOS uploads `Remote Explorer Server.app` as a zip, so double-clicking opens
-  a normal macOS app bundle instead of a terminal-style command executable.
+- macOS publishes one zip containing `Remote Explorer Server.app`, so
+  double-clicking opens a normal macOS app bundle instead of a terminal-style
+  command executable.
 - macOS builds are split into `macos-arm64` for Apple Silicon and
   `macos-x86_64` for Intel Macs. The Intel build sets
   `MACOSX_DEPLOYMENT_TARGET=11.0`.

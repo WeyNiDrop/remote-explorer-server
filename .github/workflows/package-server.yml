@@ -119,7 +119,15 @@ jobs:
         if: runner.os == 'macOS'
         run: ditto -c -k --sequesterRsrc --keepParent "dist/Remote Explorer Server.app" "${{ matrix.artifact-path }}"
 
+      - name: Upload macOS package
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ matrix.artifact-path }}
+          archive: false
+
       - name: Upload package
+        if: runner.os != 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact-name }}
