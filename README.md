@@ -138,7 +138,8 @@ Server packages are built by `.github/workflows/package-server.yml`.
   `macos-x86_64` for Intel Macs. The Intel build sets
   `MACOSX_DEPLOYMENT_TARGET=11.0`.
 - `remote-explorer-server-macos-catalina-x86_64` is a separate legacy Intel
-  package for macOS 10.15. It uses Python 3.10 and
+  package for macOS 10.15. It builds on the supported Intel macOS runner with
+  `MACOSX_DEPLOYMENT_TARGET=10.15`, Python 3.11, and
   `requirements-macos-catalina.txt` so older Qt/PySide dependencies do not
   affect the normal macOS, Windows, or Linux packages.
 - Linux uploads the `remote-explorer-server` executable.

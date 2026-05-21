@@ -61,11 +61,13 @@ jobs:
             pyinstaller-target-arch: x86_64
             macos-deployment-target: "11.0"
             legacy-catalina: false
-          - os: macos-13
+          # Build the Catalina artifact on GitHub's supported Intel image.
+          # Compatibility is controlled by the deployment target and pinned Qt stack below.
+          - os: macos-15-intel
             artifact-name: remote-explorer-server-macos-catalina-x86_64
             artifact-path: dist/remote-explorer-server-macos-catalina-x86_64.zip
             smoke-path: dist/Remote Explorer Server.app
-            python-version: "3.10"
+            python-version: "3.11"
             pyinstaller-target-arch: x86_64
             macos-deployment-target: "10.15"
             legacy-catalina: true
