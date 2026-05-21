@@ -49,6 +49,7 @@ namespace RemoteExplorer
         private long streamStatsChunkAddFailures;
         private uint streamStatsLastCompletedFrameId;
         private bool streamStatsHasCompletedFrameId;
+        private int consecutiveControlTimeouts;
 
         private static readonly byte[] StreamMagic = Encoding.ASCII.GetBytes("REXPSTR1");
         private const int StreamHeaderBytes = 24;
@@ -58,7 +59,8 @@ namespace RemoteExplorer
         private const int MaxReceiveBurstPackets = 1024;
         private const int SioUdpConnectionReset = -1744830452;
         private const double StreamStatsIntervalSeconds = 5.0;
-        private const float DefaultControlTimeoutSeconds = 3f;
+        private const float DefaultControlTimeoutSeconds = 12f;
+        private const int ConsecutiveControlTimeoutLimit = 3;
         private const float WebRtcOfferTimeoutSeconds = 15f;
         private const float WebRtcStopTimeoutSeconds = 8f;
         public const int DefaultStreamFps = 30;
@@ -270,6 +272,7 @@ namespace RemoteExplorer
                 sessionId = auth.session.id;
                 sessionKey = null;
                 commandCounter = 0;
+                ResetControlTimeouts();
                 return;
             }
 
@@ -314,6 +317,7 @@ namespace RemoteExplorer
                 passwordKey,
                 RemoteExplorerProtocol.SessionMessage(clientId, challenge.server_nonce, clientNonce));
             commandCounter = 0;
+            ResetControlTimeouts();
         }
 
         public async Task<CommandEnvelope> NavigateAsync(string url, CancellationToken cancellationToken = default)
@@ -650,6 +654,7 @@ namespace RemoteExplorer
             try
             {
                 var result = await SendRequestAsync<CommandEnvelope>(message, cancellationToken, timeoutSeconds);
+                ResetControlTimeouts();
                 if (markConnectionLostOnFailure && IsConnectionInvalidError(result))
                 {
                     MarkConnectionLost(result.error.message);
@@ -659,7 +664,11 @@ namespace RemoteExplorer
             }
             catch (Exception ex) when (IsConnectionFailure(ex, cancellationToken))
             {
-                if (markConnectionLostOnFailure)
+                if (IsTimeoutException(ex))
+                {
+                    RecordControlTimeout(ex.Message);
+                }
+                else if (markConnectionLostOnFailure)
                 {
                     MarkConnectionLost(ex.Message);
                 }
@@ -683,6 +692,7 @@ namespace RemoteExplorer
             sessionId = null;
             sessionKey = null;
             commandCounter = 0;
+            ResetControlTimeouts();
             ConnectedServer = null;
             controlEndpoint = null;
             controlClient?.Close();
@@ -737,6 +747,37 @@ namespace RemoteExplorer
             return ex is TimeoutException ||
                 ex is SocketException ||
                 ex is ObjectDisposedException;
+        }
+
+        private static bool IsTimeoutException(Exception ex)
+        {
+            if (ex is AggregateException aggregate)
+            {
+                return aggregate.Flatten().InnerExceptions.Any(IsTimeoutException);
+            }
+
+            return ex is TimeoutException;
+        }
+
+        private void RecordControlTimeout(string reason)
+        {
+            if (!IsConnected)
+            {
+                return;
+            }
+
+            consecutiveControlTimeouts++;
+            RemoteExplorerDiagnostics.Info(
+                $"Control timeout count={consecutiveControlTimeouts}/{ConsecutiveControlTimeoutLimit}: {reason}");
+            if (consecutiveControlTimeouts >= ConsecutiveControlTimeoutLimit)
+            {
+                MarkConnectionLost(reason);
+            }
+        }
+
+        private void ResetControlTimeouts()
+        {
+            consecutiveControlTimeouts = 0;
         }
 
         public void Dispose()

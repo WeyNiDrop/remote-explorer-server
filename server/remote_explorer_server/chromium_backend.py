@@ -44,6 +44,8 @@ from .streaming_protocol import (
 )
 
 LOGGER = logging.getLogger("remote_explorer.chromium")
+IDLE_CAPTURE_INTERVAL_MS = 1000
+STREAM_CLIENT_ACTIVITY_TIMEOUT_SECONDS = 25.0
 
 
 class ChromiumUnavailable(RuntimeError):
@@ -711,6 +713,8 @@ class ChromiumStreamService(QObject):
         self.stats_lock = threading.Lock()
         self.frames_sent = 0
         self.last_stats_at = time.monotonic()
+        self.last_client_activity_at = 0.0
+        self.using_idle_capture_interval = False
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         host = clean_host(str(payload.get("_source_host") or payload.get("host") or ""))
@@ -727,7 +731,7 @@ class ChromiumStreamService(QObject):
         self.target_host = QHostAddress(host)
         self.target_address = host
         self.browser.set_stream_viewport(width, height)
-        self.timer.setInterval(max(1, round(1000 / fps)))
+        self.mark_client_activity()
         LOGGER.info(
             "Chromium UDP stream start target=%s:%s source_port=%s resolution=%s size=%sx%s fps=%s requested_fps=%s quality=%s chunk_bytes=%s max_chunks=%s pace=%s/%ss",
             host,
@@ -753,6 +757,8 @@ class ChromiumStreamService(QObject):
         self.config = None
         self.target_host = None
         self.target_address = None
+        self.last_client_activity_at = 0.0
+        self.using_idle_capture_interval = False
         self.browser.clear_stream_viewport()
         return self.status()
 
@@ -804,7 +810,16 @@ class ChromiumStreamService(QObject):
             "magic": STREAM_MAGIC.decode("ascii"),
         }
 
+    def mark_client_activity(self) -> None:
+        self.last_client_activity_at = time.monotonic()
+        if not self.config:
+            return
+
+        self.timer.setInterval(self._configured_capture_interval_ms())
+        self.using_idle_capture_interval = False
+
     def _send_frame(self) -> None:
+        self._apply_idle_capture_interval_if_needed()
         if self.pending_frame is not None and not self.pending_frame.done():
             return
         if self.pending_frame is not None:
@@ -817,6 +832,26 @@ class ChromiumStreamService(QObject):
             return
         self.frame_id = (self.frame_id + 1) & 0xFFFFFFFF
         self.pending_frame = self.encoder.submit(self._capture_and_send, self.config, self.target_address, self.frame_id)
+
+    def _apply_idle_capture_interval_if_needed(self) -> None:
+        if not self.config or self.using_idle_capture_interval:
+            return
+
+        idle_for = time.monotonic() - self.last_client_activity_at
+        if idle_for < STREAM_CLIENT_ACTIVITY_TIMEOUT_SECONDS:
+            return
+
+        self.timer.setInterval(IDLE_CAPTURE_INTERVAL_MS)
+        self.using_idle_capture_interval = True
+        LOGGER.info(
+            "Chromium UDP stream idle: no client activity for %.1fs; capture interval=%sms",
+            idle_for,
+            IDLE_CAPTURE_INTERVAL_MS,
+        )
+
+    def _configured_capture_interval_ms(self) -> int:
+        fps = self.config.fps if self.config else DEFAULT_STREAM_FPS
+        return max(1, round(1000 / fps))
 
     def _capture_and_send(self, config: "ChromiumStreamConfig", target_address: str, frame_id: int) -> None:
         source_jpeg = self.browser.capture_jpeg(config.quality)
@@ -934,6 +969,7 @@ class ChromiumBrowserController:
         self.allow_evaluate_js = allow_evaluate_js
 
     def handle(self, command: str, payload: dict[str, Any], respond: Any) -> None:
+        self.stream_service.mark_client_activity()
         handlers = {
             "navigate": self._navigate,
             "click": self._click,

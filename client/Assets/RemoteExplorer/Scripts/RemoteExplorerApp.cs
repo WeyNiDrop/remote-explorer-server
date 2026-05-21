@@ -27,8 +27,8 @@ namespace RemoteExplorer
         private const float StreamWatchdogSeconds = 12f;
         private const float StreamRestartCooldownSeconds = 12f;
         private const float StreamRenderLogIntervalSeconds = 5f;
-        private const float ConnectionHealthIntervalSeconds = 5f;
-        private const float ConnectionHealthTimeoutSeconds = 4f;
+        private const float ConnectionHealthIntervalSeconds = 10f;
+        private const float ConnectionHealthTimeoutSeconds = 12f;
         private const int ConnectionHealthMaxFailures = 3;
         private const int StreamStatusLogLimit = 80;
         private static readonly Vector2 LandscapeReferenceResolution = new Vector2(1440, 920);
@@ -1434,13 +1434,6 @@ namespace RemoteExplorer
                 return;
             }
 
-            if (IsStreamActive() && lastStreamFrameAt > 0f && Time.unscaledTime - lastStreamFrameAt < ConnectionHealthIntervalSeconds * 2f)
-            {
-                connectionHealthFailures = 0;
-                nextConnectionHealthCheckAt = Time.unscaledTime + ConnectionHealthIntervalSeconds;
-                return;
-            }
-
             connectionHealthCheckInFlight = true;
             nextConnectionHealthCheckAt = Time.unscaledTime + ConnectionHealthIntervalSeconds;
             FireAndForget(CheckConnectionHealthAsync);
@@ -1461,6 +1454,12 @@ namespace RemoteExplorer
             {
                 if (client.IsConnected)
                 {
+                    if (ex is TimeoutException)
+                    {
+                        RemoteExplorerDiagnostics.Info("Connection health check timed out: " + ex.Message);
+                        return;
+                    }
+
                     connectionHealthFailures++;
                     RemoteExplorerDiagnostics.Info(
                         $"Connection health check failed count={connectionHealthFailures}/{ConnectionHealthMaxFailures}: {ex.Message}");
