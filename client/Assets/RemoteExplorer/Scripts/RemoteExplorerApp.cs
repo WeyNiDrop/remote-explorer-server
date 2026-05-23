@@ -31,6 +31,7 @@ namespace RemoteExplorer
         private const float ConnectionHealthTimeoutSeconds = 12f;
         private const int ConnectionHealthMaxFailures = 3;
         private const int StreamStatusLogLimit = 80;
+        private const float ButtonTextHorizontalPadding = 20f;
         private static readonly Vector2 LandscapeReferenceResolution = new Vector2(1440, 920);
 
         private readonly RemoteExplorerClient client = new RemoteExplorerClient();
@@ -3394,6 +3395,102 @@ private void RebuildServerDropdown()
             return button;
         }
 
+        private static float ResolveButtonWidth(string label, float requestedWidth, int fontSize)
+        {
+            var textWidth = MeasureButtonLabelWidth(label, fontSize) + ButtonTextHorizontalPadding;
+            return Mathf.Ceil(Mathf.Max(requestedWidth, textWidth));
+        }
+
+        private static float MeasureButtonLabelWidth(string label, int fontSize)
+        {
+            if (string.IsNullOrEmpty(label))
+            {
+                return 0f;
+            }
+
+            var font = BuiltinFont();
+            if (font != null)
+            {
+                var measured = 0f;
+                try
+                {
+                    font.RequestCharactersInTexture(label, fontSize, FontStyle.Bold);
+                    foreach (var character in label)
+                    {
+                        CharacterInfo info;
+                        measured += font.GetCharacterInfo(character, out info, fontSize, FontStyle.Bold)
+                            ? info.advance
+                            : EstimateButtonCharacterWidth(character, fontSize);
+                    }
+                }
+                catch (Exception)
+                {
+                    measured = 0f;
+                }
+
+                if (measured > 0f)
+                {
+                    return measured;
+                }
+            }
+
+            var fallback = 0f;
+            foreach (var character in label)
+            {
+                fallback += EstimateButtonCharacterWidth(character, fontSize);
+            }
+
+            return fallback;
+        }
+
+        private static float EstimateButtonCharacterWidth(char character, int fontSize)
+        {
+            if (char.IsWhiteSpace(character))
+            {
+                return fontSize * 0.35f;
+            }
+
+            if (character < 128)
+            {
+                return char.IsLetterOrDigit(character) ? fontSize * 0.62f : fontSize * 0.42f;
+            }
+
+            return fontSize * 1.05f;
+        }
+
+        private static void ConfigureButtonText(Text text, int fontSize)
+        {
+            if (text == null)
+            {
+                return;
+            }
+
+            text.horizontalOverflow = HorizontalWrapMode.Overflow;
+            text.verticalOverflow = VerticalWrapMode.Truncate;
+            text.resizeTextForBestFit = true;
+            text.resizeTextMinSize = 10;
+            text.resizeTextMaxSize = fontSize;
+        }
+
+        private static void ApplyButtonMinimumWidth(Button button, string label, int fontSize)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            var layout = button.GetComponent<LayoutElement>();
+            if (layout == null)
+            {
+                return;
+            }
+
+            var requestedWidth = Mathf.Max(layout.preferredWidth, layout.minWidth);
+            var resolvedWidth = ResolveButtonWidth(label, requestedWidth, fontSize);
+            layout.preferredWidth = resolvedWidth;
+            layout.minWidth = resolvedWidth;
+        }
+
         private static Button CreateStyledButton(
             Transform parent,
             string label,
@@ -3407,8 +3504,9 @@ private void RebuildServerDropdown()
             var root = CreatePanel(parent, "Button " + label, color);
             ApplyRounded(root.GetComponent<Image>(), Mathf.RoundToInt(radius));
             var layout = root.AddComponent<LayoutElement>();
-            layout.preferredWidth = width;
-            layout.minWidth = width;
+            var resolvedWidth = ResolveButtonWidth(label, width, fontSize);
+            layout.preferredWidth = resolvedWidth;
+            layout.minWidth = resolvedWidth;
             layout.preferredHeight = 42;
             layout.minHeight = 42;
             layout.flexibleWidth = 0;
@@ -3432,9 +3530,7 @@ private void RebuildServerDropdown()
 
             var text = CreateText(root.transform, label, fontSize, FontStyle.Bold, TextAnchor.MiddleCenter, 0);
             text.color = Theme.PrimaryText;
-            text.resizeTextForBestFit = true;
-            text.resizeTextMinSize = 10;
-            text.resizeTextMaxSize = fontSize;
+            ConfigureButtonText(text, fontSize);
             Stretch(text.rectTransform, 8, 8, 0, 0);
             return button;
         }
@@ -3741,7 +3837,13 @@ private void RebuildServerDropdown()
             layout.preferredHeight = height;
             layout.flexibleWidth = 1;
             var field = root.AddComponent<InputField>();
+            field.targetGraphic = root.GetComponent<Image>();
             field.contentType = password ? InputField.ContentType.Password : InputField.ContentType.Standard;
+            field.lineType = InputField.LineType.SingleLine;
+            field.customCaretColor = true;
+            field.caretColor = Theme.Accent;
+            field.selectionColor = new Color(Theme.Accent.r, Theme.Accent.g, Theme.Accent.b, 0.35f);
+            field.caretWidth = 2;
 
             var text = CreateText(root.transform, string.Empty, 14, FontStyle.Normal, TextAnchor.MiddleLeft, height);
             text.color = Theme.PrimaryText;
@@ -3768,9 +3870,7 @@ private void RebuildServerDropdown()
             if (text != null)
             {
                 text.fontSize = 14;
-                text.resizeTextForBestFit = true;
-                text.resizeTextMinSize = 10;
-                text.resizeTextMaxSize = 14;
+                ConfigureButtonText(text, 14);
             }
 
             return button;
@@ -4108,6 +4208,7 @@ private void RebuildServerDropdown()
             if (text != null)
             {
                 text.text = label;
+                ApplyButtonMinimumWidth(button, label, text.resizeTextForBestFit ? text.resizeTextMaxSize : text.fontSize);
             }
         }
 
