@@ -46,6 +46,15 @@
 
    原因是前两个错误修复后，Xcode 的模块校验继续检查导出 framework 的公开头布局，并因 umbrella header、quoted include 和 `RedefinePlatforms.h` 的包含约束失败。该失败来自导出头文件结构与 Xcode module verifier 的要求不匹配，不是业务代码编译失败。
 
+## 本仓库中的源头修复
+
+已在 `client/Assets/RemoteExplorer/Editor/RemoteExplorerIosPostprocess.cs` 中把上述导出后手动修复固化为 iOS postprocess：
+
+- 每次 iOS 导出后自动修补 WebRTC `RegisterPlugin.mm`，在 `Unity/IUnityGraphics.h` 缺失时回退到 `Tuanjie/IUnityGraphics.h`。
+- 自动将导出 Xcode 工程中的 `ENABLE_USER_SCRIPT_SANDBOXING` 改为 `NO`，覆盖 `GameAssembly`、`TuanjieFramework` 和顶层 app target 中已生成的配置项。
+- 自动将 `ENABLE_MODULE_VERIFIER` 改为 `NO`，避免 Tuanjie 导出 framework 的公开头布局被 Xcode module verifier 拦截。
+- 自动为导出的 `AppIcon.appiconset` 补齐 App Store 需要的 `1024x1024` marketing icon。
+
 ## 建议在 Unity/Tuanjie 源头核查
 
 - Unity WebRTC 插件在 Tuanjie 导出环境下是否应生成 `Tuanjie/IUnityGraphics.h` 引用，或同时提供 `Unity` 兼容头目录。
@@ -55,4 +64,3 @@
 ## 当前仍存在的非阻塞警告
 
 - `GameAssembly` 的 Run Script 未声明 outputs，因此每次构建都会执行。
-- AppIcon 缺少 App Store 所需的 `1024x1024` 图标。
