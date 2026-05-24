@@ -30,10 +30,8 @@ photos, contacts, or storage permissions.
 Android uses the custom main manifest in `Assets/Plugins/Android` to declare:
 
 - internet access
-- network and Wi-Fi state access
-- Wi-Fi multicast state changes for LAN discovery traffic
+- network state access
 
-iOS build postprocessing adds the local-network usage description and the
-multicast networking entitlement required by the UDP broadcast discovery path.
-The multicast entitlement must be enabled for the app's Apple signing profile
-before the Xcode build can use automatic LAN discovery on iPhone or iPad.
+iOS build postprocessing adds the local-network usage description used by LAN
+discovery, control, and streaming. The client no longer requests the multicast
+networking entitlement because discovery is passive.

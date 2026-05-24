@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -81,28 +80,9 @@ namespace RemoteExplorer
         {
             var result = new List<DiscoveredServer>();
             var seen = new HashSet<string>();
-            var requestId = RemoteExplorerProtocol.NewRequestId();
-            var discover = new Dictionary<string, object>
-            {
-                ["v"] = RemoteExplorerProtocol.Version,
-                ["type"] = "discover",
-                ["request_id"] = requestId,
-                ["client"] = new Dictionary<string, object>
-                {
-                    ["id"] = RemoteExplorerProtocol.ClientId(),
-                    ["name"] = RemoteExplorerProtocol.ClientName()
-                }
-            };
 
-            using (var udp = new UdpClient(0))
+            using (var udp = CreateDiscoveryListener(discoveryPort))
             {
-                udp.EnableBroadcast = true;
-                var payload = RemoteExplorerProtocol.Encode(discover);
-                foreach (var endpoint in BroadcastEndpoints(discoveryPort))
-                {
-                    await udp.SendAsync(payload, payload.Length, endpoint);
-                }
-
                 var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
                 while (DateTime.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
                 {
@@ -167,82 +147,12 @@ namespace RemoteExplorer
             return result;
         }
 
-        private static IEnumerable<IPEndPoint> BroadcastEndpoints(int discoveryPort)
+        private static UdpClient CreateDiscoveryListener(int discoveryPort)
         {
-            var sent = new HashSet<string>();
-            var fallback = new IPEndPoint(IPAddress.Broadcast, discoveryPort);
-            sent.Add(fallback.ToString());
-            yield return fallback;
-
-            var loopback = new IPEndPoint(IPAddress.Loopback, discoveryPort);
-            sent.Add(loopback.ToString());
-            yield return loopback;
-
-            NetworkInterface[] interfaces;
-            try
-            {
-                interfaces = NetworkInterface.GetAllNetworkInterfaces();
-            }
-            catch
-            {
-                yield break;
-            }
-
-            foreach (var networkInterface in interfaces)
-            {
-                if (networkInterface.OperationalStatus != OperationalStatus.Up)
-                {
-                    continue;
-                }
-
-                IPInterfaceProperties properties;
-                try
-                {
-                    properties = networkInterface.GetIPProperties();
-                }
-                catch
-                {
-                    continue;
-                }
-
-                foreach (var unicast in properties.UnicastAddresses)
-                {
-                    if (unicast.Address.AddressFamily != AddressFamily.InterNetwork || unicast.IPv4Mask == null)
-                    {
-                        continue;
-                    }
-
-                    var broadcast = CalculateBroadcast(unicast.Address, unicast.IPv4Mask);
-                    if (broadcast == null)
-                    {
-                        continue;
-                    }
-
-                    var endpoint = new IPEndPoint(broadcast, discoveryPort);
-                    if (sent.Add(endpoint.ToString()))
-                    {
-                        yield return endpoint;
-                    }
-                }
-            }
-        }
-
-        private static IPAddress CalculateBroadcast(IPAddress address, IPAddress mask)
-        {
-            var addressBytes = address.GetAddressBytes();
-            var maskBytes = mask.GetAddressBytes();
-            if (addressBytes.Length != 4 || maskBytes.Length != 4)
-            {
-                return null;
-            }
-
-            var broadcastBytes = new byte[4];
-            for (var i = 0; i < 4; i++)
-            {
-                broadcastBytes[i] = (byte)(addressBytes[i] | ~maskBytes[i]);
-            }
-
-            return new IPAddress(broadcastBytes);
+            var udp = new UdpClient(AddressFamily.InterNetwork);
+            udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            udp.Client.Bind(new IPEndPoint(IPAddress.Any, discoveryPort));
+            return udp;
         }
 
         public async Task ConnectAsync(DiscoveredServer server, string password, CancellationToken cancellationToken = default)

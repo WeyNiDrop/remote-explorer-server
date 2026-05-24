@@ -18,7 +18,7 @@ Status: in development.
 
 - Python/PySide6 desktop server.
 - Qt WebEngine browser with persistent profile storage.
-- UDP broadcast discovery.
+- Server-announced UDP discovery.
 - UDP control channel.
 - Optional password authentication.
 - Basic browser commands:
@@ -102,8 +102,7 @@ Client MVP screens:
 
 ```mermaid
 flowchart LR
-  Mobile["Android/iOS Client"] -- "UDP broadcast discover" --> Discovery["Server Discovery Socket"]
-  Discovery -- "UDP offer" --> Mobile
+  Discovery["Server Discovery Socket"] -- "UDP offer announce" --> Mobile["Android/iOS Client"]
   Mobile -- "UDP auth/control" --> Control["Server Control Socket"]
   Control --> Auth["Session/Auth Layer"]
   Auth --> BrowserCtl["Browser Controller"]

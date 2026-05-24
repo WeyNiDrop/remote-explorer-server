@@ -54,7 +54,7 @@ class DiscoveryService(QObject):
         self.socket.readyRead.connect(self._read_pending)
 
         self.announce_timer = QTimer(self)
-        self.announce_timer.setInterval(2500)
+        self.announce_timer.setInterval(1000)
         self.announce_timer.timeout.connect(self.broadcast_offer)
         self.announce_timer.start()
 

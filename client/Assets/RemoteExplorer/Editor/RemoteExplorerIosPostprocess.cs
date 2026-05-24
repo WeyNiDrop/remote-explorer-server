@@ -11,8 +11,6 @@ namespace RemoteExplorer.Editor
 {
     public static class RemoteExplorerIosPostprocess
     {
-        private const string EntitlementsFileName = "RemoteExplorer.entitlements";
-        private const string MulticastNetworkingEntitlement = "com.apple.developer.networking.multicast";
         private const string UnityGraphicsInclude = "#include \"Unity/IUnityGraphics.h\"";
         private const string CompatibleUnityGraphicsInclude =
 @"#if __has_include(""Unity/IUnityGraphics.h"")
@@ -70,38 +68,6 @@ namespace RemoteExplorer.Editor
                 project.SetBuildProperty(frameworkTargetGuid, "ENABLE_MODULE_VERIFIER", "NO");
             }
 
-            var entitlementsProjectPath = project.GetBuildPropertyForAnyConfig(
-                mainTargetGuid,
-                "CODE_SIGN_ENTITLEMENTS");
-            if (string.IsNullOrEmpty(entitlementsProjectPath))
-            {
-                entitlementsProjectPath = EntitlementsFileName;
-                project.AddFile(entitlementsProjectPath, entitlementsProjectPath);
-                project.SetBuildProperty(
-                    mainTargetGuid,
-                    "CODE_SIGN_ENTITLEMENTS",
-                    entitlementsProjectPath);
-            }
-
-            var entitlementsPath = Path.Combine(pathToBuiltProject, entitlementsProjectPath);
-            var entitlementsDirectory = Path.GetDirectoryName(entitlementsPath);
-            if (!string.IsNullOrEmpty(entitlementsDirectory))
-            {
-                Directory.CreateDirectory(entitlementsDirectory);
-            }
-
-            var entitlements = new PlistDocument();
-            if (File.Exists(entitlementsPath))
-            {
-                entitlements.ReadFromFile(entitlementsPath);
-            }
-            else
-            {
-                entitlements.Create();
-            }
-
-            entitlements.root.SetBoolean(MulticastNetworkingEntitlement, true);
-            entitlements.WriteToFile(entitlementsPath);
             project.WriteToFile(projectPath);
 
             PatchXcodeBuildSettingsText(projectPath);

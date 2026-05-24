@@ -20,27 +20,14 @@ All requests should include:
 
 ## Discovery
 
-Clients broadcast:
-
-```json
-{
-  "v": 1,
-  "type": "discover",
-  "request_id": "abc",
-  "client": {
-    "id": "phone-1",
-    "name": "Alice iPhone"
-  }
-}
-```
-
-Servers reply directly to the sender and may also broadcast periodic announces:
+Servers broadcast an `offer` announce to the discovery port once per second.
+Clients discover servers passively by listening on that port:
 
 ```json
 {
   "v": 1,
   "type": "offer",
-  "request_id": "abc",
+  "request_id": null,
   "server": {
     "id": "server-id",
     "name": "Living Room PC",

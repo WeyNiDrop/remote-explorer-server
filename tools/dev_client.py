@@ -77,23 +77,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def discover(args: argparse.Namespace) -> int:
-    message = {
-        "v": 1,
-        "type": "discover",
-        "request_id": make_request_id(),
-        "client": {
-            "id": socket.gethostname(),
-            "name": "Python Dev Client",
-        },
-    }
     deadline = time.time() + args.timeout
     seen: set[tuple[str, int, str]] = set()
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", args.port))
         sock.settimeout(0.3)
-        sock.sendto(encode_message(message), ("255.255.255.255", args.port))
-        sock.sendto(encode_message(message), ("127.0.0.1", args.port))
         while time.time() < deadline:
             try:
                 data, address = sock.recvfrom(65535)

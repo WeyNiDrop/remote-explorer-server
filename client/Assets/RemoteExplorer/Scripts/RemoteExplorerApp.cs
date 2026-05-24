@@ -2816,16 +2816,7 @@ private void RebuildServerDropdown()
                         SelectSavedServer(capturedIndex);
                         SetStatus("已加载到左侧编辑表单");
                     },
-                    () =>
-                    {
-                        if (!isOnline)
-                        {
-                            SetStatus("该服务器离线");
-                            return;
-                        }
-
-                        ConnectSavedServer(capturedIndex);
-                    });
+                    () => ConnectSavedServer(capturedIndex));
                 serverRowButtons.Add(connectButton);
             }
 
@@ -3585,7 +3576,7 @@ private void RebuildServerDropdown()
 
             CreateSecondaryButton(actions.transform, "编辑", editAction, 78);
             var connectButton = CreatePrimaryButton(actions.transform, "连接", connectAction, 78);
-            connectButton.interactable = online;
+            connectButton.interactable = true;
             return connectButton;
         }
 

@@ -11,7 +11,7 @@ protocol; a Python development client is included for testing the first slice.
 
 - Cross-platform desktop server for Windows and macOS.
 - Embedded browser with persistent cookies/cache/profile data.
-- UDP broadcast discovery on the LAN.
+- Server-announced UDP discovery on the LAN.
 - UDP control channel for navigation, click/tap, text input, scroll, back,
   forward, reload, and selector-based actions.
 - Optional password authentication using a challenge-response handshake.

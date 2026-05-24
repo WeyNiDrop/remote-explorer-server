@@ -13,7 +13,7 @@ Status: implemented in this slice.
 
 Features:
 
-- UDP broadcast discovery.
+- Server-announced UDP discovery.
 - Server list with host, port, name, auth mode, and server id.
 - Password input.
 - Password and last server saved with Unity `PlayerPrefs`.
