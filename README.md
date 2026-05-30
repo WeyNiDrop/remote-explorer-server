@@ -1,5 +1,7 @@
 # Remote Explorer
 
+Language: [English](README.md) | [简体中文](README.zh-CN.md)
+
 Remote Explorer is a LAN-first remote browser controller.
 
 The initial version provides a Python/PySide6 desktop server with an embedded
