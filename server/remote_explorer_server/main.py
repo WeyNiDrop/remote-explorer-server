@@ -51,10 +51,18 @@ def configure_logging(log_dir: Path | None = None) -> tuple[logging.handlers.Que
 
 def build_parser() -> argparse.ArgumentParser:
     saved = load_server_settings()
+    saved_web_port = saved.get("web_port")
+    default_web_port = int(saved_web_port) if saved_web_port else None
     parser = argparse.ArgumentParser(description="Remote Explorer desktop server")
     parser.add_argument("--name", default=str(saved.get("name") or default_server_name()), help="Server name shown to clients")
     parser.add_argument("--discovery-port", type=int, default=int(saved.get("discovery_port") or DEFAULT_DISCOVERY_PORT))
     parser.add_argument("--control-port", type=int, default=int(saved.get("control_port") or DEFAULT_CONTROL_PORT))
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=default_web_port,
+        help="TCP port for the supplemental H5 client. Defaults to the control port.",
+    )
     parser.add_argument("--password", default=os.environ.get("REMOTE_EXPLORER_PASSWORD", str(saved.get("password") or "")))
     parser.add_argument("--data-dir", type=Path, default=default_data_dir())
     parser.add_argument("--start-url", default=str(saved.get("start_url") or "about:blank"))
@@ -89,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_evaluate_js=args.allow_evaluate_js,
         browser_engine=args.browser_engine,
         browser_executable=args.browser_executable,
+        web_port=args.web_port,
     )
     log_listener, log_path = configure_logging(config.data_dir / "logs")
 
@@ -101,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         from .discovery import DiscoveryService
         from .server_ui import ChromeInstallDialog, ServerControlPanel
         from .security import AuthManager
+        from .web_client import WebClientService
     except ImportError as exc:
         print(
             "PySide6 is required to run the server. Install with:\n"
@@ -138,12 +148,27 @@ def main(argv: list[str] | None = None) -> int:
         capabilities=capabilities,
         handle_discovery=discovery_on_control_port,
     )
+    web_client = None
+    try:
+        web_client = WebClientService(
+            config,
+            auth_manager,
+            window.controller.handle,
+            window,
+            server_id=server_id,
+            capabilities=capabilities,
+            parent=window,
+        )
+        web_client.start()
+    except Exception as exc:
+        logging.getLogger("remote_explorer.main").exception("H5 client server failed to start: %s", exc)
 
     window.setWindowTitle("RCViewer Server")
     window.setWindowFlags(window.windowFlags() | Qt.WindowType.FramelessWindowHint)
-    window.setMinimumSize(1120, 720)
+    window.setMinimumSize(1120, 800)
     window.statusBar().showMessage(
         f"Discovery UDP {config.discovery_port} | Control UDP {config.control_port} | "
+        f"H5 TCP {(web_client.bound_port if web_client else config.effective_web_port)} | "
         f"Auth {'password' if config.password else 'none'}"
     )
     window.statusBar().hide()
@@ -151,12 +176,30 @@ def main(argv: list[str] | None = None) -> int:
     # Keep service objects alive for the lifetime of the Qt app.
     window.discovery_service = discovery
     window.control_service = control
+    window.web_client_service = web_client
     window.log_listener = log_listener
-    window.server_control_panel = ServerControlPanel(config, log_path, chrome_executable, window)
+    web_qr_png = None
+    if web_client is not None:
+        try:
+            web_qr_png = web_client.qr_png(scale=5)
+        except Exception as exc:
+            logging.getLogger("remote_explorer.main").warning("Could not render H5 QR code: %s", exc)
+    window.server_control_panel = ServerControlPanel(
+        config,
+        log_path,
+        chrome_executable,
+        window,
+        web_url=web_client.client_url if web_client is not None else None,
+        web_urls=web_client.urls if web_client is not None else None,
+        web_qr_png=web_qr_png,
+    )
     window.setCentralWidget(window.server_control_panel)
     if browser_error:
         window.server_control_panel.set_startup_warning(browser_error)
     control.client_changed.connect(window.server_control_panel.update_client)
+    if web_client is not None:
+        web_client.client_changed.connect(window.server_control_panel.update_client)
+        app.aboutToQuit.connect(web_client.stop)
     window.show()
 
     if not chrome_executable:

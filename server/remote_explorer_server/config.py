@@ -22,10 +22,15 @@ class ServerConfig:
     allow_evaluate_js: bool = False
     browser_engine: str = "auto"
     browser_executable: str | None = None
+    web_port: int | None = None
 
     @property
     def server_id_path(self) -> Path:
         return self.data_dir / "server_id"
+
+    @property
+    def effective_web_port(self) -> int:
+        return int(self.web_port or self.control_port)
 
 
 def default_server_name() -> str:
@@ -66,6 +71,7 @@ def save_server_settings(config: ServerConfig) -> Path:
         "start_url": config.start_url,
         "browser_engine": config.browser_engine,
         "browser_executable": config.browser_executable or "",
+        "web_port": config.web_port or 0,
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path

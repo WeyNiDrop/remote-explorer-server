@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QMouseEvent
+from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from .config import ServerConfig, save_server_settings
 
 CHROME_DOWNLOAD_URL = "https://www.google.com/chrome/"
+H5_QR_DISPLAY_SIZE = 232
 
 STYLE = """
 QWidget#serverConsole,
@@ -220,14 +221,21 @@ class ServerControlPanel(QWidget):
         log_path: Path | None,
         chrome_executable: str | None,
         parent: QWidget | None = None,
+        *,
+        web_url: str | None = None,
+        web_urls: list[str] | None = None,
+        web_qr_png: bytes | None = None,
     ) -> None:
         super().__init__(parent)
         self.config = config
         self.log_path = log_path
         self.chrome_executable = chrome_executable
+        self.web_url = web_url
+        self.web_urls = web_urls or ([web_url] if web_url else [])
+        self.web_qr_png = web_qr_png
         self.setObjectName("serverConsole")
         self.setStyleSheet(STYLE)
-        self.setMinimumSize(960, 660)
+        self.setMinimumSize(960, 740)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -339,11 +347,54 @@ class ServerControlPanel(QWidget):
         layout.addWidget(client, 1)
         return card
 
+    def _build_h5_card(self) -> QFrame:
+        card = self._inner()
+        card.setMinimumHeight(H5_QR_DISPLAY_SIZE + 36)
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(18)
+
+        qr = QLabel()
+        qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qr.setFixedSize(H5_QR_DISPLAY_SIZE, H5_QR_DISPLAY_SIZE)
+        qr.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        qr.setStyleSheet("background: transparent; border: none; padding: 0;")
+        pixmap = QPixmap()
+        if self.web_qr_png and pixmap.loadFromData(self.web_qr_png, "PNG"):
+            if pixmap.width() > H5_QR_DISPLAY_SIZE or pixmap.height() > H5_QR_DISPLAY_SIZE:
+                pixmap = pixmap.scaled(
+                    H5_QR_DISPLAY_SIZE,
+                    H5_QR_DISPLAY_SIZE,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+            qr.setPixmap(pixmap)
+        else:
+            qr.setText("QR unavailable")
+        layout.addWidget(qr, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(9)
+        text_layout.addWidget(self._text("Server H5 Client", 16, bold=True))
+        text_layout.addWidget(self._text("Scan QR or open address", 12, muted=True, wrap=True))
+
+        url_label = self._text(self.web_url or "", 15, bold=True, wrap=True)
+        url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        url_label.setMinimumHeight(44)
+        url_label.setMaximumHeight(72)
+        text_layout.addWidget(url_label)
+        text_layout.addStretch(1)
+        layout.addLayout(text_layout, 1)
+        return card
+
     def _build_log_card(self) -> QFrame:
         card = self._card()
         layout = QVBoxLayout(card)
         layout.setContentsMargins(24, 22, 24, 24)
         layout.setSpacing(14)
+
+        if self.web_url:
+            layout.addWidget(self._build_h5_card(), 0)
 
         header = QHBoxLayout()
         header.setSpacing(12)
@@ -359,7 +410,7 @@ class ServerControlPanel(QWidget):
 
         self.log_preview = QTextEdit()
         self.log_preview.setReadOnly(True)
-        self.log_preview.setMinimumHeight(440)
+        self.log_preview.setMinimumHeight(300)
         layout.addWidget(self.log_preview, 1)
         return card
 
@@ -530,6 +581,7 @@ class ServerSettingsDialog(QDialog):
             allow_evaluate_js=self.config.allow_evaluate_js,
             browser_engine=self.config.browser_engine,
             browser_executable=self.config.browser_executable,
+            web_port=self.config.web_port,
         )
         save_server_settings(self.config)
         self.accept()

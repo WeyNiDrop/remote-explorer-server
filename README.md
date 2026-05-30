@@ -14,6 +14,7 @@ protocol; a Python development client is included for testing the first slice.
 - Server-announced UDP discovery on the LAN.
 - UDP control channel for navigation, click/tap, text input, scroll, back,
   forward, reload, and selector-based actions.
+- Supplemental H5 client served by the desktop server for QR-code pairing.
 - Optional password authentication using a challenge-response handshake.
 - Python CLI client for local/LAN development.
 
@@ -60,6 +61,23 @@ python tools/dev_client.py discover
 python tools/dev_client.py navigate --host 127.0.0.1 --password 123456 https://example.com
 python tools/dev_client.py click --host 127.0.0.1 --password 123456 200 300
 python tools/dev_client.py text --host 127.0.0.1 --password 123456 "hello"
+```
+
+## H5 Client
+
+The desktop server also starts a lightweight H5 client over TCP. The control
+panel shows a QR code and URL; scanning it opens the web client on the same LAN.
+This is supplemental and does not replace the native UDP/Unity client path.
+At startup the server tries to register a local mDNS hostname from the machine
+name, using lowercase ASCII and removing spaces, for example
+`livingroompc.local`. If local-domain registration is unavailable, the QR code
+falls back to the LAN IP URL.
+
+By default the H5 service uses the same numeric port as the UDP control service
+(TCP and UDP can share a port). To choose a different TCP port:
+
+```bash
+python -m remote_explorer_server --password 123456 --web-port 8080
 ```
 
 ## Unity Client

@@ -164,6 +164,27 @@ class AuthManager:
             },
         }
 
+    def start_web_session(self, client: dict[str, Any], password: str | None = None) -> dict[str, Any]:
+        client_id = _client_id(client)
+        self._cleanup()
+
+        if self.password:
+            if not password:
+                raise AuthError("password_required", "Password is required")
+            if not hmac.compare_digest(password, self.password):
+                raise AuthError("bad_password", "Password is invalid")
+            session = self._create_session(client_id, "none", None)
+            return {
+                "id": session.id,
+                "auth": "web",
+            }
+
+        session = self._create_session(client_id, "none", None)
+        return {
+            "id": session.id,
+            "auth": "none",
+        }
+
     def verify_command(self, message: dict[str, Any]) -> Session:
         auth = message.get("auth")
         if not isinstance(auth, dict):
@@ -199,6 +220,14 @@ class AuthManager:
         session.last_counter = counter
         session.last_seen = time.time()
         return session
+
+    def touch_session(self, session_id: str) -> bool:
+        self._cleanup()
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        session.last_seen = time.time()
+        return True
 
     def _create_session(self, client_id: str, mode: str, session_key: bytes | None) -> Session:
         session = Session(
