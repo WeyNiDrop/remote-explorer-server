@@ -73,7 +73,7 @@ jobs:
             legacy-catalina: true
           - os: ubuntu-latest
             artifact-name: remote-explorer-server-linux
-            artifact-path: dist/remote-explorer-server
+            artifact-path: dist/remote-explorer-server-linux.tar.gz
             smoke-path: dist/remote-explorer-server
             python-version: "3.11"
             pyinstaller-target-arch: ""
@@ -118,6 +118,11 @@ jobs:
       - name: Package macOS app bundle
         if: runner.os == 'macOS'
         run: ditto -c -k --sequesterRsrc --keepParent "dist/Remote Explorer Server.app" "${{ matrix.artifact-path }}"
+
+      - name: Package Linux executable
+        if: runner.os == 'Linux'
+        shell: bash
+        run: tar -czf "${{ matrix.artifact-path }}" -C dist remote-explorer-server
 
       - name: Upload package
         uses: actions/upload-artifact@v4

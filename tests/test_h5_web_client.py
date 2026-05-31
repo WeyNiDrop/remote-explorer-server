@@ -7,7 +7,7 @@ from remote_explorer_server.config import ServerConfig
 from remote_explorer_server.local_domain import local_domain_for_machine, sanitize_domain_label
 from remote_explorer_server.qr import make_qr_matrix, make_qr_png
 from remote_explorer_server.security import AuthError, AuthManager
-from remote_explorer_server.web_client import local_client_urls
+from remote_explorer_server.web_client import INDEX_HTML, local_client_urls
 
 
 class H5WebClientTests(unittest.TestCase):
@@ -26,6 +26,11 @@ class H5WebClientTests(unittest.TestCase):
     def test_qr_matrix_decodes_with_standard_module_placement(self) -> None:
         url = "http://laptop-4s4cgo0p.local:45454/"
         self.assertEqual(_decode_qr_byte_payload(make_qr_matrix(url)), url)
+
+    def test_h5_client_uses_popup_input_and_30_fps_option(self) -> None:
+        self.assertIn('id="inputModal"', INDEX_HTML)
+        self.assertIn('<option value="33">30 fps</option>', INDEX_HTML)
+        self.assertNotIn("scrollIntoView", INDEX_HTML)
 
     def test_auth_manager_can_touch_existing_web_snapshot_session(self) -> None:
         auth = AuthManager(None)

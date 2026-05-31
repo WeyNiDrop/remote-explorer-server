@@ -811,6 +811,29 @@ INDEX_HTML = r"""<!doctype html>
       min-height: 20px;
       margin-top: 8px;
     }
+    .input-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 9;
+      display: none;
+      align-items: flex-end;
+      justify-content: center;
+      padding: 16px max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+      background: rgba(23, 27, 34, .36);
+    }
+    .input-modal.show { display: flex; }
+    .input-card {
+      width: min(480px, 100%);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }
+    .input-card .actions {
+      justify-content: flex-end;
+      margin-top: 10px;
+    }
     @media (max-width: 860px) {
       main {
         grid-template-columns: 1fr;
@@ -875,15 +898,15 @@ INDEX_HTML = r"""<!doctype html>
               <option value="500">2 fps</option>
               <option value="250">4 fps</option>
               <option value="125">8 fps</option>
+              <option value="100">10 fps</option>
+              <option value="67">15 fps</option>
+              <option value="50">20 fps</option>
+              <option value="33">30 fps</option>
             </select>
           </div>
         </div>
         <div class="panel">
-          <p class="label" data-i18n="input">Input</p>
-          <div class="row">
-            <input id="textInput" autocomplete="off" placeholder="Text" data-i18n-placeholder="textPlaceholder">
-            <button class="primary" id="sendTextButton" data-i18n="send">Send</button>
-          </div>
+          <p class="label" data-i18n="keys">Keys</p>
           <div class="row">
             <button id="backspaceButton" data-i18n="backspace">Backspace</button>
             <button id="escapeButton" data-i18n="esc">Esc</button>
@@ -922,6 +945,17 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </div>
 
+  <div class="input-modal" id="inputModal" aria-hidden="true">
+    <div class="input-card" role="dialog" aria-modal="true" aria-labelledby="inputDialogTitle">
+      <p class="label" id="inputDialogTitle" data-i18n="remoteInputTitle">Remote Input</p>
+      <input id="textInput" autocomplete="off" placeholder="Text" data-i18n-placeholder="textPlaceholder">
+      <div class="row actions">
+        <button id="inputCancelButton" data-i18n="cancel">Cancel</button>
+        <button class="primary" id="sendTextButton" data-i18n="send">Send</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const $ = id => document.getElementById(id);
     const I18N = {
@@ -934,6 +968,9 @@ INDEX_HTML = r"""<!doctype html>
         bookmarks: "Bookmarks",
         add: "Add",
         input: "Input",
+        keys: "Keys",
+        remoteInputTitle: "Remote Input",
+        cancel: "Cancel",
         send: "Send",
         enter: "Enter",
         backspace: "Backspace",
@@ -944,7 +981,6 @@ INDEX_HTML = r"""<!doctype html>
         streamOn: "Stream on",
         streamOff: "Stream off",
         remoteInputReady: "Remote input captured",
-        remoteInputSynced: "Remote input synced",
         scroll: "Scroll",
         up: "Up",
         down: "Down",
@@ -982,6 +1018,9 @@ INDEX_HTML = r"""<!doctype html>
         bookmarks: "收藏夹",
         add: "加入",
         input: "输入",
+        keys: "按键",
+        remoteInputTitle: "远端输入",
+        cancel: "取消",
         send: "发送",
         enter: "回车",
         backspace: "退格",
@@ -992,7 +1031,6 @@ INDEX_HTML = r"""<!doctype html>
         streamOn: "串流已开启",
         streamOff: "串流已关闭",
         remoteInputReady: "已捕获远端输入框",
-        remoteInputSynced: "远端输入已同步",
         scroll: "滚动",
         up: "向上",
         down: "向下",
@@ -1041,7 +1079,6 @@ INDEX_HTML = r"""<!doctype html>
       lastRemoteUrl: "",
       urlDirty: false,
       remoteInputActive: false,
-      inputSyncTimer: null,
       mediaStatus: null,
       streamEnabled: loadBoolean("remoteExplorerH5StreamEnabled", true),
       streamWidth: loadNumber("remoteExplorerH5StreamWidth", 960),
@@ -1189,35 +1226,31 @@ INDEX_HTML = r"""<!doctype html>
       const click = result && result.js && typeof result.js === "object" ? { ...result.js, ...result } : result;
       if (!click || !click.editable) {
         state.remoteInputActive = false;
+        closeInputModal();
         return;
       }
       state.remoteInputActive = true;
-      const input = $("textInput");
-      input.value = typeof click.input_value === "string" ? click.input_value : "";
-      input.scrollIntoView({ block: "center", inline: "nearest" });
-      input.focus();
-      try {
-        input.setSelectionRange(input.value.length, input.value.length);
-      } catch (_) {}
+      openInputModal(typeof click.input_value === "string" ? click.input_value : "");
       setOverlay(tr("remoteInputReady"));
     }
-    function scheduleRemoteInputSync() {
-      if (!state.remoteInputActive) return;
-      window.clearTimeout(state.inputSyncTimer);
-      state.inputSyncTimer = window.setTimeout(() => syncRemoteInput(), 260);
+    function openInputModal(value = "") {
+      const input = $("textInput");
+      input.value = value;
+      $("inputModal").classList.add("show");
+      $("inputModal").setAttribute("aria-hidden", "false");
+      window.setTimeout(() => {
+        input.focus();
+        try {
+          input.setSelectionRange(input.value.length, input.value.length);
+        } catch (_) {}
+      }, 0);
     }
-    async function syncRemoteInput() {
-      if (!state.remoteInputActive) return;
-      window.clearTimeout(state.inputSyncTimer);
-      try {
-        await enqueueCommand("set_input", { text: $("textInput").value });
-        setOverlay(tr("remoteInputSynced"));
-      } catch (error) {
-        setOverlay(error.message || tr("statusFailed"));
-      }
+    function closeInputModal({ clear = false } = {}) {
+      $("inputModal").classList.remove("show");
+      $("inputModal").setAttribute("aria-hidden", "true");
+      if (clear) $("textInput").value = "";
     }
     async function sendInput() {
-      window.clearTimeout(state.inputSyncTimer);
       const input = $("textInput");
       const text = input.value;
       try {
@@ -1229,6 +1262,7 @@ INDEX_HTML = r"""<!doctype html>
         await enqueueCommand("key", { key: "Enter" });
         input.value = "";
         state.remoteInputActive = false;
+        closeInputModal();
       } catch (error) {
         setOverlay(error.message || tr("statusFailed"));
       }
@@ -1490,8 +1524,27 @@ INDEX_HTML = r"""<!doctype html>
       $("forwardButton").onclick = () => enqueueCommand("forward", {}).then(() => refreshStatus({ forceUrl: true }));
       $("reloadButton").onclick = () => enqueueCommand("reload", {}).then(() => refreshStatus({ forceUrl: true }));
       $("sendTextButton").onclick = sendInput;
-      $("textInput").addEventListener("input", scheduleRemoteInputSync);
-      $("textInput").addEventListener("keydown", event => { if (event.key === "Enter") sendInput(); });
+      $("inputCancelButton").onclick = () => {
+        state.remoteInputActive = false;
+        closeInputModal({ clear: true });
+      };
+      $("inputModal").addEventListener("click", event => {
+        if (event.target === $("inputModal")) {
+          state.remoteInputActive = false;
+          closeInputModal({ clear: true });
+        }
+      });
+      $("textInput").addEventListener("keydown", event => {
+        if (event.key === "Enter" && !event.isComposing) {
+          event.preventDefault();
+          sendInput();
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          state.remoteInputActive = false;
+          closeInputModal({ clear: true });
+        }
+      });
       $("backspaceButton").onclick = () => enqueueCommand("key", { key: "Backspace" });
       $("escapeButton").onclick = () => enqueueCommand("key", { key: "Escape" });
       $("scrollUpButton").onclick = () => enqueueCommand("scroll", { dx: 0, dy: -520 });

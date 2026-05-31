@@ -70,6 +70,9 @@ python tools/dev_client.py text --host 127.0.0.1 --password 123456 "hello"
 The desktop server also starts a lightweight H5 client over TCP. The control
 panel shows a QR code and URL; scanning it opens the web client on the same LAN.
 This is supplemental and does not replace the native UDP/Unity client path.
+When a remote webpage input is tapped, the H5 client opens a local popup input
+dialog and sends the text plus Enter from there. The H5 preview stream can be
+configured up to 30 fps.
 At startup the server tries to register a local mDNS hostname from the machine
 name, using lowercase ASCII and removing spaces, for example
 `livingroompc.local`. If local-domain registration is unavailable, the QR code
@@ -163,7 +166,8 @@ Server packages are built by `.github/workflows/package-server.yml`.
   `MACOSX_DEPLOYMENT_TARGET=10.15`, Python 3.11, and
   `requirements-macos-catalina.txt` so older Qt/PySide dependencies do not
   affect the normal macOS, Windows, or Linux packages.
-- Linux uploads the `remote-explorer-server` executable.
+- Linux uploads `remote-explorer-server-linux.tar.gz`, containing the
+  `remote-explorer-server` executable.
 
 With the current default PySide6 dependency, macOS 11 is the intended minimum
 for normal packaged macOS apps. Use the Catalina artifact only when macOS 10.15

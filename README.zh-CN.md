@@ -63,7 +63,9 @@ python tools/dev_client.py text --host 127.0.0.1 --password 123456 "hello"
 
 桌面服务端会同时启动一个基于 TCP 的轻量 H5 客户端。服务端控制面板会展示二维码和访问地址；用户扫描二维码即可在同一局域网内打开网页客户端。
 
-H5 客户端是补充方案，不替代原生 UDP/Unity 客户端路径。服务端启动时会尝试根据机器名注册本地 mDNS 域名，域名会转换为小写 ASCII 并移除空格，例如 `livingroompc.local`。如果本地域名注册不可用，二维码会回退到局域网 IP 地址。
+H5 客户端是补充方案，不替代原生 UDP/Unity 客户端路径。点击远程网页输入框时，H5 客户端会打开本地弹窗输入框，并从弹窗中发送文本和回车。H5 预览串流最高可选择 30 fps。
+
+服务端启动时会尝试根据机器名注册本地 mDNS 域名，域名会转换为小写 ASCII 并移除空格，例如 `livingroompc.local`。如果本地域名注册不可用，二维码会回退到局域网 IP 地址。
 
 默认情况下，H5 服务使用与 UDP 控制服务相同的数字端口。TCP 和 UDP 可以共用同一个端口号。如需指定不同的 TCP 端口：
 
@@ -135,7 +137,7 @@ python tools/dev_client.py navigate --host 127.0.0.1 https://example.com
 - macOS 发布包含 `Remote Explorer Server.app` 的 zip，双击后会像普通 macOS App 一样打开，而不是作为终端命令运行。
 - macOS 构建拆分为 Apple Silicon 的 `macos-arm64` 和 Intel Mac 的 `macos-x86_64`。Intel 构建设置 `MACOSX_DEPLOYMENT_TARGET=11.0`。
 - `remote-explorer-server-macos-catalina-x86_64` 是单独的 legacy Intel 包，用于 macOS 10.15。它在受支持的 Intel macOS runner 上构建，设置 `MACOSX_DEPLOYMENT_TARGET=10.15`，使用 Python 3.11 和 `requirements-macos-catalina.txt`，因此旧版 Qt/PySide 依赖不会影响常规 macOS、Windows 或 Linux 包。
-- Linux 上传 `remote-explorer-server` 可执行文件。
+- Linux 上传 `remote-explorer-server-linux.tar.gz`，其中包含 `remote-explorer-server` 可执行文件。
 
 在当前默认 PySide6 依赖下，常规 macOS App 的目标最低版本是 macOS 11。如需 macOS 10.15 支持，请使用 Catalina artifact。
 
