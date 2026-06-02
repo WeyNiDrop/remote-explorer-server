@@ -73,10 +73,12 @@ This is supplemental and does not replace the native UDP/Unity client path.
 When a remote webpage input is tapped, the H5 client opens a local popup input
 dialog and sends the text plus Enter from there. The H5 preview stream can be
 configured up to 30 fps.
-At startup the server tries to register a local mDNS hostname from the machine
-name, using lowercase ASCII and removing spaces, for example
-`livingroompc.local`. If local-domain registration is unavailable, the QR code
-falls back to the LAN IP URL.
+On first startup the server generates and saves a stable local mDNS hostname
+from the machine name, using lowercase ASCII and removing spaces, for example
+`livingroompc.local`. Later starts keep that hostname even if the machine or
+server display name changes. Change the H5 `.local` hostname from server
+settings or `--local-domain` when you want to rename it. If local-domain
+registration is unavailable, the QR code falls back to the LAN IP URL.
 
 By default the H5 service uses the same numeric port as the UDP control service
 (TCP and UDP can share a port). To choose a different TCP port:

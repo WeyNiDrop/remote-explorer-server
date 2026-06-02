@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import os
 import queue
+import socket
 import sys
 from pathlib import Path
 
@@ -13,10 +14,12 @@ from .config import (
     DEFAULT_CONTROL_PORT,
     DEFAULT_DISCOVERY_PORT,
     ServerConfig,
+    config_with_local_domain,
     default_data_dir,
     default_server_name,
     load_server_settings,
     load_or_create_server_id,
+    save_server_local_domain,
 )
 
 
@@ -55,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
     default_web_port = int(saved_web_port) if saved_web_port else None
     parser = argparse.ArgumentParser(description="Remote Explorer desktop server")
     parser.add_argument("--name", default=str(saved.get("name") or default_server_name()), help="Server name shown to clients")
+    parser.add_argument(
+        "--local-domain",
+        default=str(saved.get("local_domain") or ""),
+        help="Stable .local hostname for the H5 client. Generated once and saved unless changed.",
+    )
     parser.add_argument("--discovery-port", type=int, default=int(saved.get("discovery_port") or DEFAULT_DISCOVERY_PORT))
     parser.add_argument("--control-port", type=int, default=int(saved.get("control_port") or DEFAULT_CONTROL_PORT))
     parser.add_argument(
@@ -86,6 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_args = sys.argv[1:] if argv is None else argv
+    local_domain_arg_provided = any(arg == "--local-domain" or arg.startswith("--local-domain=") for arg in raw_args)
     args = build_parser().parse_args(argv)
     config = ServerConfig(
         name=args.name,
@@ -98,7 +108,12 @@ def main(argv: list[str] | None = None) -> int:
         browser_engine=args.browser_engine,
         browser_executable=args.browser_executable,
         web_port=args.web_port,
+        local_domain=args.local_domain or None,
     )
+    before_local_domain = config.local_domain
+    config = config_with_local_domain(config, socket.gethostname(), default_server_name())
+    if config.local_domain and (not before_local_domain or local_domain_arg_provided or config.local_domain != before_local_domain):
+        save_server_local_domain(config.data_dir, config.local_domain)
     log_listener, log_path = configure_logging(config.data_dir / "logs")
 
     try:

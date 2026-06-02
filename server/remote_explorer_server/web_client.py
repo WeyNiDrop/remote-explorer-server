@@ -14,7 +14,7 @@ from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QSize, Qt, S
 from PySide6.QtGui import QImage
 
 from .config import ServerConfig
-from .local_domain import MdnsHostResponder, local_domain_for_machine
+from .local_domain import MdnsHostResponder, local_domain_for_machine, normalize_local_domain
 from .protocol import PROTOCOL_VERSION, error_message, result_message
 from .qr import make_qr_png
 from .security import AuthError, AuthManager
@@ -100,7 +100,7 @@ class WebClientService(QObject):
         self._httpd = _RemoteExplorerHttpServer(("", port), _WebClientHandler, self)
         self.bound_port = int(self._httpd.server_port)
         addresses = _local_ipv4_addresses()
-        self.local_domain = local_domain_for_machine(socket.gethostname(), self.config.name)
+        self.local_domain = normalize_local_domain(self.config.local_domain) or local_domain_for_machine(socket.gethostname(), self.config.name)
         self._mdns = MdnsHostResponder(self.local_domain, addresses, address_provider=_local_ipv4_addresses)
         self.local_domain_registered = self._mdns.start()
         self._refresh_urls()

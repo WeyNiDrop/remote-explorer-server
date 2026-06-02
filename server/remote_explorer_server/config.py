@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -23,6 +23,7 @@ class ServerConfig:
     browser_engine: str = "auto"
     browser_executable: str | None = None
     web_port: int | None = None
+    local_domain: str | None = None
 
     @property
     def server_id_path(self) -> Path:
@@ -72,9 +73,30 @@ def save_server_settings(config: ServerConfig) -> Path:
         "browser_engine": config.browser_engine,
         "browser_executable": config.browser_executable or "",
         "web_port": config.web_port or 0,
+        "local_domain": config.local_domain or "",
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def save_server_local_domain(data_dir: Path, local_domain: str) -> Path:
+    path = server_settings_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = load_server_settings(data_dir)
+    payload["local_domain"] = local_domain
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def config_with_local_domain(config: ServerConfig, *fallback_names: str | None) -> ServerConfig:
+    from .local_domain import local_domain_for_machine, normalize_local_domain
+
+    local_domain = normalize_local_domain(config.local_domain)
+    if not local_domain:
+        local_domain = local_domain_for_machine(*fallback_names, config.name)
+    if local_domain == config.local_domain:
+        return config
+    return replace(config, local_domain=local_domain)
 
 
 def load_or_create_server_id(config: ServerConfig) -> str:

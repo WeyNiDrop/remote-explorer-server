@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from remote_explorer_server.config import ServerConfig
-from remote_explorer_server.local_domain import MdnsHostResponder, local_domain_for_machine, sanitize_domain_label
+from remote_explorer_server.config import ServerConfig, config_with_local_domain, load_server_settings, save_server_local_domain
+from remote_explorer_server.local_domain import MdnsHostResponder, local_domain_for_machine, normalize_local_domain, sanitize_domain_label
 from remote_explorer_server.qr import make_qr_matrix, make_qr_png
 from remote_explorer_server.security import SESSION_TTL_SECONDS, WEB_SESSION_TTL_SECONDS, AuthError, AuthManager
 from remote_explorer_server.web_client import INDEX_HTML, local_client_urls
@@ -95,6 +96,37 @@ class H5WebClientTests(unittest.TestCase):
         self.assertEqual(sanitize_domain_label("Living Room PC"), "livingroompc")
         self.assertEqual(sanitize_domain_label("客厅 PC_01"), "pc-01")
         self.assertEqual(local_domain_for_machine("Living Room PC"), "livingroompc.local")
+        self.assertEqual(normalize_local_domain(" Living Room PC.local "), "livingroompc.local")
+
+    def test_server_local_domain_is_generated_once_and_then_kept(self) -> None:
+        config = ServerConfig(
+            name="Living Room PC",
+            discovery_port=45454,
+            control_port=45455,
+            password=None,
+            data_dir=Path("."),
+            start_url="about:blank",
+        )
+        generated = config_with_local_domain(config, "Laptop 01")
+        self.assertEqual(generated.local_domain, "laptop01.local")
+
+        renamed = ServerConfig(
+            name="Different Name",
+            discovery_port=45454,
+            control_port=45455,
+            password=None,
+            data_dir=Path("."),
+            start_url="about:blank",
+            local_domain=generated.local_domain,
+        )
+        self.assertEqual(config_with_local_domain(renamed, "Another Machine").local_domain, "laptop01.local")
+
+    def test_server_local_domain_field_can_be_saved_without_other_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            save_server_local_domain(Path(temp_dir), "laptop01.local")
+            settings = load_server_settings(Path(temp_dir))
+        self.assertEqual(settings["local_domain"], "laptop01.local")
+        self.assertNotIn("password", settings)
 
     def test_local_client_urls_prefer_registered_domain_with_ip_fallbacks(self) -> None:
         self.assertEqual(

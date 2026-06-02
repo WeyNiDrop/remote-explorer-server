@@ -25,6 +25,14 @@ def local_domain_for_machine(*names: str | None) -> str:
     return "remoteexplorer.local"
 
 
+def normalize_local_domain(value: str | None) -> str:
+    raw = (value or "").strip().lower().rstrip(".")
+    if raw.endswith(".local"):
+        raw = raw[:-6]
+    label = sanitize_domain_label(raw)
+    return f"{label}.local" if label else ""
+
+
 def sanitize_domain_label(value: str) -> str:
     chars: list[str] = []
     for char in value.strip().lower():

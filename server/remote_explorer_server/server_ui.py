@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from .config import ServerConfig, save_server_settings
+from .local_domain import normalize_local_domain
 
 CHROME_DOWNLOAD_URL = "https://www.google.com/chrome/"
 H5_QR_DISPLAY_SIZE = 232
@@ -523,7 +524,7 @@ class ServerSettingsDialog(QDialog):
         self.setWindowTitle("服务端设置")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
         self.setModal(True)
-        self.setFixedSize(460, 318)
+        self.setFixedSize(460, 378)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(26, 18, 26, 24)
@@ -544,6 +545,11 @@ class ServerSettingsDialog(QDialog):
         self.password_input.setFixedHeight(40)
         fields.addWidget(self.port_input, 1, 0)
         fields.addWidget(self.password_input, 1, 1)
+        fields.addWidget(ServerControlPanel._text("H5 .local 域名", 13, muted=True), 2, 0, 1, 2)
+        self.local_domain_input = QLineEdit(config.local_domain or "")
+        self.local_domain_input.setPlaceholderText("example.local")
+        self.local_domain_input.setFixedHeight(40)
+        fields.addWidget(self.local_domain_input, 3, 0, 1, 2)
         layout.addLayout(fields)
 
         self.error_label = ServerControlPanel._text("", 12, muted=True)
@@ -570,6 +576,10 @@ class ServerSettingsDialog(QDialog):
         if port <= 0 or port > 65535:
             self.error_label.setText("端口范围必须是 1-65535")
             return
+        local_domain = normalize_local_domain(self.local_domain_input.text())
+        if not local_domain:
+            self.error_label.setText("H5 .local 域名不能为空")
+            return
 
         self.config = ServerConfig(
             name=self.config.name,
@@ -582,6 +592,7 @@ class ServerSettingsDialog(QDialog):
             browser_engine=self.config.browser_engine,
             browser_executable=self.config.browser_executable,
             web_port=self.config.web_port,
+            local_domain=local_domain,
         )
         save_server_settings(self.config)
         self.accept()
