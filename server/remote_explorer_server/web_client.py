@@ -101,13 +101,9 @@ class WebClientService(QObject):
         self.bound_port = int(self._httpd.server_port)
         addresses = _local_ipv4_addresses()
         self.local_domain = local_domain_for_machine(socket.gethostname(), self.config.name)
-        self._mdns = MdnsHostResponder(self.local_domain, addresses)
+        self._mdns = MdnsHostResponder(self.local_domain, addresses, address_provider=_local_ipv4_addresses)
         self.local_domain_registered = self._mdns.start()
-        self.urls = local_client_urls(
-            self.bound_port,
-            domain=self.local_domain if self.local_domain_registered else None,
-            addresses=addresses,
-        )
+        self._refresh_urls()
         self._thread = threading.Thread(
             target=self._httpd.serve_forever,
             name="RemoteExplorerH5",
@@ -133,9 +129,11 @@ class WebClientService(QObject):
             mdns.stop()
 
     def qr_png(self, *, scale: int = 7, border: int = 4) -> bytes:
+        self._refresh_urls()
         return make_qr_png(self.client_url, scale=scale, border=border)
 
     def info(self) -> dict[str, Any]:
+        self._refresh_urls()
         return {
             "server": self._server_payload(),
             "web": {
@@ -194,6 +192,18 @@ class WebClientService(QObject):
         if not request.event.wait(REQUEST_TIMEOUT_SECONDS):
             return {"ok": False, "error": {"code": "timeout", "message": "Login timed out"}}
         return request.result or {"ok": False, "error": {"code": "empty_response", "message": "Login returned no response"}}
+
+    def _refresh_urls(self) -> None:
+        if self._mdns is not None:
+            self._mdns.refresh_addresses()
+            addresses = self._mdns.current_addresses()
+        else:
+            addresses = _local_ipv4_addresses()
+        self.urls = local_client_urls(
+            self.bound_port,
+            domain=self.local_domain if self.local_domain_registered else None,
+            addresses=addresses,
+        )
 
     @Slot(object)
     def _process_json_request(self, request: _JsonRequest) -> None:
@@ -1003,6 +1013,7 @@ INDEX_HTML = r"""<!doctype html>
         offline: "Offline",
         couldNotConnect: "Could not connect",
         snapshotFailed: "Snapshot failed",
+        sessionExpired: "Session expired, reconnecting",
         statusFailed: "Status failed",
         navigateFailed: "Navigate failed",
         clickSent: "Click sent",
@@ -1053,6 +1064,7 @@ INDEX_HTML = r"""<!doctype html>
         offline: "离线",
         couldNotConnect: "无法连接",
         snapshotFailed: "预览失败",
+        sessionExpired: "会话已过期，正在重新连接",
         statusFailed: "状态获取失败",
         navigateFailed: "打开失败",
         clickSent: "点击已发送",
@@ -1073,6 +1085,7 @@ INDEX_HTML = r"""<!doctype html>
       clientId: localStorage.getItem("remoteExplorerH5ClientId") || makeClientId(),
       sessionId: "",
       sessionAuth: "",
+      authRetrying: false,
       snapshotUrl: "",
       language: loadLanguage(),
       bookmarks: loadBookmarks(),
@@ -1369,6 +1382,8 @@ INDEX_HTML = r"""<!doctype html>
       });
     }
     async function loginOrPrompt() {
+      if (state.authRetrying) return;
+      state.authRetrying = true;
       try {
         const result = await login("");
         completeAuth(result.session);
@@ -1381,6 +1396,8 @@ INDEX_HTML = r"""<!doctype html>
           return;
         }
         throw error;
+      } finally {
+        state.authRetrying = false;
       }
     }
     async function unlock() {
@@ -1396,7 +1413,9 @@ INDEX_HTML = r"""<!doctype html>
     function completeAuth(session) {
       state.sessionId = session.id;
       state.sessionAuth = session.auth;
+      state.authRetrying = false;
       $("authPanel").classList.remove("show");
+      $("passwordInput").value = "";
       setStatus(tr("connected"));
       setOverlay(tr("liveSnapshot"));
       refreshStatus();
@@ -1424,7 +1443,27 @@ INDEX_HTML = r"""<!doctype html>
         auth: { session_id: state.sessionId }
       };
       const response = await postMessage(message);
+      if (response.type === "error") {
+        const failure = protocolError(response);
+        if (failure.code === "invalid_session") handleSessionExpired();
+        throw failure;
+      }
       return response.result || {};
+    }
+    function protocolError(response) {
+      const error = response.error || {};
+      const failure = new Error(error.message || tr("statusFailed"));
+      failure.code = error.code || "command_failed";
+      return failure;
+    }
+    function handleSessionExpired() {
+      if (!state.sessionId && $("authPanel").classList.contains("show")) return;
+      state.sessionId = "";
+      state.sessionAuth = "";
+      state.snapshotInFlight = false;
+      window.clearTimeout(state.snapshotTimer);
+      setOverlay(tr("sessionExpired"));
+      loginOrPrompt().catch(error => setStatus(error.message || tr("couldNotConnect")));
     }
     async function refreshSnapshot() {
       if (!state.sessionId) return;
@@ -1447,7 +1486,17 @@ INDEX_HTML = r"""<!doctype html>
             quality: state.streamQuality
           })
         });
-        if (!response.ok) throw new Error(response.statusText);
+        if (!response.ok) {
+          let failure = new Error(response.statusText);
+          try {
+            const data = await response.json();
+            const error = data.error || {};
+            failure = new Error(error.message || response.statusText);
+            failure.code = error.code || "snapshot_failed";
+          } catch (_) {}
+          if (failure.code === "invalid_session") handleSessionExpired();
+          throw failure;
+        }
         const blob = await response.blob();
         const nextUrl = URL.createObjectURL(blob);
         const frame = $("frame");
@@ -1459,7 +1508,9 @@ INDEX_HTML = r"""<!doctype html>
         state.snapshotUrl = nextUrl;
         frame.src = nextUrl;
       } catch (error) {
-        setOverlay(error.message || tr("snapshotFailed"));
+        if (error.code !== "invalid_session") {
+          setOverlay(error.message || tr("snapshotFailed"));
+        }
       } finally {
         state.snapshotInFlight = false;
         scheduleSnapshot(document.hidden ? Math.max(1200, state.streamIntervalMs * 2) : state.streamIntervalMs);

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from remote_explorer_server.config import ServerConfig
-from remote_explorer_server.local_domain import local_domain_for_machine, sanitize_domain_label
+from remote_explorer_server.local_domain import MdnsHostResponder, local_domain_for_machine, sanitize_domain_label
 from remote_explorer_server.qr import make_qr_matrix, make_qr_png
-from remote_explorer_server.security import AuthError, AuthManager
+from remote_explorer_server.security import SESSION_TTL_SECONDS, WEB_SESSION_TTL_SECONDS, AuthError, AuthManager
 from remote_explorer_server.web_client import INDEX_HTML, local_client_urls
 
 
@@ -32,6 +33,11 @@ class H5WebClientTests(unittest.TestCase):
         self.assertIn('<option value="33">30 fps</option>', INDEX_HTML)
         self.assertNotIn("scrollIntoView", INDEX_HTML)
 
+    def test_h5_client_handles_expired_sessions(self) -> None:
+        self.assertIn("invalid_session", INDEX_HTML)
+        self.assertIn("handleSessionExpired", INDEX_HTML)
+        self.assertIn("sessionExpired", INDEX_HTML)
+
     def test_auth_manager_can_touch_existing_web_snapshot_session(self) -> None:
         auth = AuthManager(None)
         result = auth.start_auth({"id": "h5"})
@@ -46,6 +52,7 @@ class H5WebClientTests(unittest.TestCase):
             auth.start_web_session({"id": "h5"}, "")
 
         session = auth.start_web_session({"id": "h5"}, "secret")
+        self.assertEqual(session["auth"], "web")
         verified = auth.verify_command(
             {
                 "v": 1,
@@ -57,6 +64,21 @@ class H5WebClientTests(unittest.TestCase):
             }
         )
         self.assertEqual(verified.client_id, "h5")
+        self.assertEqual(verified.mode, "web")
+
+    def test_h5_web_session_outlives_native_session_ttl(self) -> None:
+        auth = AuthManager(None)
+        with patch("remote_explorer_server.security.time.time") as now:
+            now.return_value = 1_000
+            native_session = auth.start_auth({"id": "native"})["session"]["id"]
+            web_session = auth.start_web_session({"id": "h5"})["id"]
+
+            now.return_value = 1_000 + SESSION_TTL_SECONDS + 1
+            self.assertFalse(auth.touch_session(native_session))
+            self.assertTrue(auth.touch_session(web_session))
+
+            now.return_value = 1_000 + SESSION_TTL_SECONDS + WEB_SESSION_TTL_SECONDS + 2
+            self.assertFalse(auth.touch_session(web_session))
 
     def test_web_port_defaults_to_control_port(self) -> None:
         config = ServerConfig(
@@ -82,6 +104,19 @@ class H5WebClientTests(unittest.TestCase):
                 "http://192.168.1.8:45454/",
             ],
         )
+
+    def test_mdns_responder_refreshes_addresses_from_provider(self) -> None:
+        addresses = [["192.168.1.8"], ["192.168.1.9"]]
+
+        def provider() -> list[str]:
+            return addresses.pop(0) if addresses else ["192.168.1.9"]
+
+        responder = MdnsHostResponder("livingroompc.local", ["192.168.1.7"], address_provider=provider)
+        self.assertTrue(responder.refresh_addresses())
+        self.assertEqual(responder.current_addresses(), ["192.168.1.8"])
+        self.assertTrue(responder.refresh_addresses())
+        self.assertEqual(responder.current_addresses(), ["192.168.1.9"])
+        self.assertFalse(responder.refresh_addresses())
 
 
 def _decode_qr_byte_payload(matrix: list[list[bool]]) -> str:

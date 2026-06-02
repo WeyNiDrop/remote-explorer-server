@@ -4,12 +4,14 @@ import logging
 import socket
 import struct
 import threading
+from collections.abc import Callable
 
 LOGGER = logging.getLogger("remote_explorer.local_domain")
 
 MDNS_ADDRESS = "224.0.0.251"
 MDNS_PORT = 5353
 MDNS_TTL_SECONDS = 120
+MDNS_ANNOUNCE_INTERVAL_SECONDS = 60
 DNS_TYPE_A = 1
 DNS_TYPE_ANY = 255
 DNS_CLASS_IN = 1
@@ -41,12 +43,14 @@ def sanitize_domain_label(value: str) -> str:
 
 
 class MdnsHostResponder:
-    def __init__(self, hostname: str, addresses: list[str]) -> None:
+    def __init__(self, hostname: str, addresses: list[str], address_provider: Callable[[], list[str]] | None = None) -> None:
         self.hostname = _normalize_hostname(hostname)
         self.addresses = [address for address in addresses if _is_ipv4(address)]
+        self.address_provider = address_provider
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._running = threading.Event()
+        self._lock = threading.Lock()
 
     def start(self) -> bool:
         if not self.hostname or not self.addresses:
@@ -62,6 +66,7 @@ class MdnsHostResponder:
                     pass
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+            sock.settimeout(MDNS_ANNOUNCE_INTERVAL_SECONDS)
             sock.bind(("", MDNS_PORT))
             membership = socket.inet_aton(MDNS_ADDRESS) + socket.inet_aton("0.0.0.0")
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
@@ -99,10 +104,35 @@ class MdnsHostResponder:
         sock = self._socket
         if sock is None:
             return
+        self.refresh_addresses()
+        if not self.current_addresses():
+            return
         try:
             sock.sendto(self._response_packet(), (MDNS_ADDRESS, MDNS_PORT))
         except OSError as exc:
             LOGGER.debug("Could not announce mDNS host %s: %s", self.hostname, exc)
+
+    def current_addresses(self) -> list[str]:
+        with self._lock:
+            return list(self.addresses)
+
+    def set_addresses(self, addresses: list[str]) -> bool:
+        next_addresses = [address for address in addresses if _is_ipv4(address)]
+        with self._lock:
+            if next_addresses == self.addresses:
+                return False
+            self.addresses = next_addresses
+        LOGGER.info("Updated local mDNS host %s -> %s", self.hostname, ", ".join(next_addresses) or "no IPv4 address")
+        return True
+
+    def refresh_addresses(self) -> bool:
+        if self.address_provider is None:
+            return False
+        try:
+            return self.set_addresses(self.address_provider())
+        except OSError as exc:
+            LOGGER.debug("Could not refresh mDNS addresses for %s: %s", self.hostname, exc)
+            return False
 
     def _serve(self) -> None:
         sock = self._socket
@@ -111,13 +141,13 @@ class MdnsHostResponder:
         while self._running.is_set():
             try:
                 data, _address = sock.recvfrom(9000)
+            except socket.timeout:
+                self.announce()
+                continue
             except OSError:
                 break
             if self._matches_query(data):
-                try:
-                    sock.sendto(self._response_packet(), (MDNS_ADDRESS, MDNS_PORT))
-                except OSError as exc:
-                    LOGGER.debug("Could not answer mDNS query for %s: %s", self.hostname, exc)
+                self.announce()
 
     def _matches_query(self, data: bytes) -> bool:
         try:
@@ -128,8 +158,9 @@ class MdnsHostResponder:
         return any(name == expected and qtype in {DNS_TYPE_A, DNS_TYPE_ANY} for name, qtype, _qclass in questions)
 
     def _response_packet(self) -> bytes:
-        header = struct.pack("!HHHHHH", 0, 0x8400, 0, len(self.addresses), 0, 0)
-        answers = b"".join(_a_record(self.hostname, address) for address in self.addresses)
+        addresses = self.current_addresses()
+        header = struct.pack("!HHHHHH", 0, 0x8400, 0, len(addresses), 0, 0)
+        answers = b"".join(_a_record(self.hostname, address) for address in addresses)
         return header + answers
 
 

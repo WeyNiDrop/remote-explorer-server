@@ -13,6 +13,7 @@ from .protocol import canonical_json
 PBKDF2_ITERATIONS = 100_000
 CHALLENGE_TTL_SECONDS = 120
 SESSION_TTL_SECONDS = 24 * 60 * 60
+WEB_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 class AuthError(ValueError):
@@ -40,6 +41,7 @@ class Session:
     session_key: bytes | None
     created_at: float
     last_seen: float
+    ttl_seconds: int
     last_counter: int = 0
 
 
@@ -173,16 +175,16 @@ class AuthManager:
                 raise AuthError("password_required", "Password is required")
             if not hmac.compare_digest(password, self.password):
                 raise AuthError("bad_password", "Password is invalid")
-            session = self._create_session(client_id, "none", None)
+            session = self._create_session(client_id, "web", None, ttl_seconds=WEB_SESSION_TTL_SECONDS)
             return {
                 "id": session.id,
                 "auth": "web",
             }
 
-        session = self._create_session(client_id, "none", None)
+        session = self._create_session(client_id, "web", None, ttl_seconds=WEB_SESSION_TTL_SECONDS)
         return {
             "id": session.id,
-            "auth": "none",
+            "auth": "web",
         }
 
     def verify_command(self, message: dict[str, Any]) -> Session:
@@ -200,7 +202,7 @@ class AuthManager:
         if not session:
             raise AuthError("invalid_session", "Session is invalid or expired")
 
-        if session.mode == "none":
+        if session.mode in {"none", "web"}:
             session.last_seen = time.time()
             return session
 
@@ -229,7 +231,14 @@ class AuthManager:
         session.last_seen = time.time()
         return True
 
-    def _create_session(self, client_id: str, mode: str, session_key: bytes | None) -> Session:
+    def _create_session(
+        self,
+        client_id: str,
+        mode: str,
+        session_key: bytes | None,
+        *,
+        ttl_seconds: int = SESSION_TTL_SECONDS,
+    ) -> Session:
         session = Session(
             id=random_hex(),
             client_id=client_id,
@@ -237,6 +246,7 @@ class AuthManager:
             session_key=session_key,
             created_at=time.time(),
             last_seen=time.time(),
+            ttl_seconds=ttl_seconds,
         )
         self._sessions[session.id] = session
         return session
@@ -254,7 +264,7 @@ class AuthManager:
         expired_sessions = [
             session_id
             for session_id, session in self._sessions.items()
-            if now - session.last_seen > SESSION_TTL_SECONDS
+            if now - session.last_seen > session.ttl_seconds
         ]
         for session_id in expired_sessions:
             self._sessions.pop(session_id, None)
