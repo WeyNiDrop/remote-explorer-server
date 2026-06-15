@@ -6,7 +6,7 @@ import sys
 
 APP_NAME = 'Remote Explorer Server'
 EXECUTABLE_NAME = 'remote-explorer-server'
-APP_VERSION = '0.1.0'
+APP_VERSION = '0.1.2'
 BUNDLE_IDENTIFIER = 'com.remoteexplorer.server'
 
 is_macos = sys.platform == 'darwin'

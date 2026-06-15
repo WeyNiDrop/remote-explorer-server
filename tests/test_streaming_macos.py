@@ -324,6 +324,28 @@ class MacChromiumStreamTests(unittest.TestCase):
         self.assertEqual(service.timer.interval, round(1000 / service.config.fps))
         self.assertFalse(service.using_idle_capture_interval)
 
+    def test_stream_capture_suspends_after_long_inactivity_and_resumes_on_activity(self) -> None:
+        service = ChromiumStreamService.__new__(ChromiumStreamService)
+        service.timer = FakeTimer()
+        service.timer.start()
+        service.config = ChromiumStreamConfig("127.0.0.1", 54321, 640, 360, 30, 55, "360p")
+        service.last_client_activity_at = 10.0
+        service.using_idle_capture_interval = True
+        service.capture_suspended = False
+
+        suspend_at = 10.0 + chromium_backend.STREAM_CAPTURE_SUSPEND_TIMEOUT_SECONDS
+        with patch.object(chromium_backend.time, "monotonic", return_value=suspend_at):
+            ChromiumStreamService._apply_idle_capture_interval_if_needed(service)
+
+        self.assertFalse(service.timer.isActive())
+        self.assertTrue(service.capture_suspended)
+
+        with patch.object(chromium_backend.time, "monotonic", return_value=suspend_at + 1.0):
+            ChromiumStreamService.mark_client_activity(service)
+
+        self.assertTrue(service.timer.isActive())
+        self.assertFalse(service.capture_suspended)
+
     def test_chromium_stream_target_does_not_resize_or_emulate_visible_window(self) -> None:
         browser = ChromiumBrowserService.__new__(ChromiumBrowserService)
         browser.connection = FakeCdpConnection()

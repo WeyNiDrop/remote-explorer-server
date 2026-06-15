@@ -4,6 +4,7 @@ import json
 import logging
 import socket
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -87,6 +88,9 @@ class WebClientService(QObject):
         self._mdns: MdnsHostResponder | None = None
         self._httpd: _RemoteExplorerHttpServer | None = None
         self._thread: threading.Thread | None = None
+        self._snapshot_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="RemoteExplorerH5Snapshot")
+        self._snapshot_future: Future[None] | None = None
+        self._stopping = False
         self.json_request_ready.connect(self._process_json_request)
         self.snapshot_request_ready.connect(self._process_snapshot_request)
         self.web_login_request_ready.connect(self._process_web_login_request)
@@ -96,6 +100,7 @@ class WebClientService(QObject):
         return self.urls[0] if self.urls else f"http://127.0.0.1:{self.bound_port}/"
 
     def start(self) -> None:
+        self._stopping = False
         port = self.config.effective_web_port
         self._httpd = _RemoteExplorerHttpServer(("", port), _WebClientHandler, self)
         self.bound_port = int(self._httpd.server_port)
@@ -113,20 +118,21 @@ class WebClientService(QObject):
         LOGGER.info("H5 client server listening on TCP %s url=%s", self.bound_port, self.client_url)
 
     def stop(self) -> None:
+        self._stopping = True
         httpd = self._httpd
-        if httpd is None:
-            return
-        self._httpd = None
-        httpd.shutdown()
-        httpd.server_close()
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+        if httpd is not None:
+            self._httpd = None
+            httpd.shutdown()
+            httpd.server_close()
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=2.0)
         mdns = self._mdns
         self._mdns = None
         self.local_domain_registered = False
         if mdns is not None:
             mdns.stop()
+        self._snapshot_executor.shutdown(wait=False, cancel_futures=True)
 
     def qr_png(self, *, scale: int = 7, border: int = 4) -> bytes:
         self._refresh_urls()
@@ -221,8 +227,30 @@ class WebClientService(QObject):
         try:
             if not self.auth_manager.touch_session(request.session_id):
                 request.error = {"code": "invalid_session", "message": "Session is invalid or expired"}
+                request.event.set()
+                return
+            if self._stopping:
+                request.error = {"code": "server_stopping", "message": "Server is stopping"}
+                request.event.set()
+                return
+
+            browser = getattr(self.browser_window, "browser", None)
+            if browser is not None and hasattr(browser, "capture_jpeg"):
+                if self._snapshot_future is not None and not self._snapshot_future.done():
+                    request.error = {"code": "snapshot_busy", "message": "A snapshot is already in progress"}
+                    request.event.set()
+                    return
+                self._snapshot_future = self._snapshot_executor.submit(self._capture_snapshot_worker, request)
             else:
                 request.result = self._capture_jpeg(request.width, request.quality)
+                request.event.set()
+        except Exception as exc:
+            request.error = {"code": "snapshot_failed", "message": str(exc)}
+            request.event.set()
+
+    def _capture_snapshot_worker(self, request: _SnapshotRequest) -> None:
+        try:
+            request.result = self._capture_jpeg(request.width, request.quality)
         except Exception as exc:
             request.error = {"code": "snapshot_failed", "message": str(exc)}
         finally:
@@ -428,7 +456,8 @@ class _WebClientHandler(BaseHTTPRequestHandler):
             quality = _clamp(_coerce_int(body.get("quality"), SNAPSHOT_DEFAULT_QUALITY), 35, 90, SNAPSHOT_DEFAULT_QUALITY)
             data, error = self.service.capture_snapshot(session_id, width, quality)
             if error is not None:
-                self._send_json({"ok": False, "error": error}, status=HTTPStatus.UNAUTHORIZED)
+                status = HTTPStatus.UNAUTHORIZED if error.get("code") == "invalid_session" else HTTPStatus.SERVICE_UNAVAILABLE
+                self._send_json({"ok": False, "error": error}, status=status)
                 return
             self._send_bytes(data or b"", "image/jpeg", cache=False)
             return
@@ -1099,6 +1128,7 @@ INDEX_HTML = r"""<!doctype html>
       streamIntervalMs: loadNumber("remoteExplorerH5StreamInterval", 250),
       snapshotTimer: null,
       snapshotInFlight: false,
+      snapshotAbortController: null,
       commandChain: Promise.resolve(),
       lastWheelAt: 0,
       touchStart: null
@@ -1342,7 +1372,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     function scheduleSnapshot(delay) {
       window.clearTimeout(state.snapshotTimer);
-      if (!state.streamEnabled || !state.sessionId) return;
+      if (!state.streamEnabled || !state.sessionId || document.hidden) return;
       state.snapshotTimer = window.setTimeout(refreshSnapshot, delay);
     }
     function makeClientId() {
@@ -1471,15 +1501,19 @@ INDEX_HTML = r"""<!doctype html>
         setOverlay(tr("streamOff"));
         return;
       }
+      if (document.hidden) return;
       if (state.snapshotInFlight) {
         scheduleSnapshot(state.streamIntervalMs);
         return;
       }
       state.snapshotInFlight = true;
+      const abortController = new AbortController();
+      state.snapshotAbortController = abortController;
       try {
         const response = await fetch("/api/snapshot.jpg", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: abortController.signal,
           body: JSON.stringify({
             session_id: state.sessionId,
             width: state.streamWidth,
@@ -1508,12 +1542,15 @@ INDEX_HTML = r"""<!doctype html>
         state.snapshotUrl = nextUrl;
         frame.src = nextUrl;
       } catch (error) {
-        if (error.code !== "invalid_session") {
+        if (error.name !== "AbortError" && error.code !== "invalid_session") {
           setOverlay(error.message || tr("snapshotFailed"));
         }
       } finally {
+        if (state.snapshotAbortController === abortController) {
+          state.snapshotAbortController = null;
+        }
         state.snapshotInFlight = false;
-        scheduleSnapshot(document.hidden ? Math.max(1200, state.streamIntervalMs * 2) : state.streamIntervalMs);
+        scheduleSnapshot(state.streamIntervalMs);
       }
     }
     async function refreshStatus(options = {}) {
@@ -1632,6 +1669,20 @@ INDEX_HTML = r"""<!doctype html>
           enqueueCommand("scroll", { dx: -dx * 2, dy: -dy * 2 });
         }
       }, { passive: true });
+      document.addEventListener("visibilitychange", () => {
+        window.clearTimeout(state.snapshotTimer);
+        if (document.hidden) {
+          if (state.snapshotAbortController) state.snapshotAbortController.abort();
+          return;
+        }
+        if (state.streamEnabled && state.sessionId && !state.snapshotInFlight) refreshSnapshot();
+        refreshStatus();
+        refreshMediaStatus();
+      });
+      window.addEventListener("pagehide", () => {
+        window.clearTimeout(state.snapshotTimer);
+        if (state.snapshotAbortController) state.snapshotAbortController.abort();
+      });
     }
     async function boot() {
       bindControls();
@@ -1645,8 +1696,8 @@ INDEX_HTML = r"""<!doctype html>
         setStatus(tr("offline"));
         setOverlay(error.message || tr("couldNotConnect"));
       }
-      setInterval(refreshStatus, 2500);
-      setInterval(refreshMediaStatus, 3000);
+      setInterval(() => { if (!document.hidden) refreshStatus(); }, 2500);
+      setInterval(() => { if (!document.hidden) refreshMediaStatus(); }, 3000);
     }
     boot();
   </script>

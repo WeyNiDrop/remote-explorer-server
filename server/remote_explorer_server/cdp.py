@@ -7,6 +7,7 @@ import os
 import socket
 import struct
 import threading
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -27,23 +28,44 @@ class CdpConnection:
         self.websocket = _WebSocket(websocket_url)
         self.next_id = 0
         self.lock = threading.Lock()
+        self.closed = threading.Event()
 
     def close(self) -> None:
+        self.closed.set()
         self.websocket.close()
 
     def call(self, method: str, params: dict[str, Any] | None = None, timeout: float = 10.0) -> Any:
-        with self.lock:
+        timeout = max(0.001, float(timeout))
+        deadline = time.monotonic() + timeout
+        if not self.lock.acquire(timeout=timeout):
+            raise CdpError(f"{method} timed out waiting for the CDP connection")
+        try:
+            if self.closed.is_set():
+                raise CdpError("CDP connection is closed")
             self.next_id += 1
             message_id = self.next_id
-            self.websocket.send_json({"id": message_id, "method": method, "params": params or {}})
+            try:
+                self.websocket.send_json({"id": message_id, "method": method, "params": params or {}})
+            except OSError as exc:
+                raise CdpError(f"{method} could not be sent: {exc}") from exc
             while True:
-                message = self.websocket.recv_json(timeout)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CdpError(f"{method} timed out after {timeout:.1f}s")
+                try:
+                    message = self.websocket.recv_json(remaining)
+                except (TimeoutError, socket.timeout) as exc:
+                    raise CdpError(f"{method} timed out after {timeout:.1f}s") from exc
+                except OSError as exc:
+                    raise CdpError(f"{method} connection failed: {exc}") from exc
                 if message.get("id") != message_id:
                     continue
                 if "error" in message:
                     error = message["error"]
                     raise CdpError(f"{method} failed: {error}")
                 return message.get("result") or {}
+        finally:
+            self.lock.release()
 
 
 class _WebSocket:
@@ -65,6 +87,10 @@ class _WebSocket:
         self._handshake()
 
     def close(self) -> None:
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self.socket.close()
         except OSError:
@@ -126,16 +152,23 @@ class _WebSocket:
     def _recv_text(self, timeout: float) -> str:
         self.socket.settimeout(timeout)
         fragments: list[bytes] = []
+        receiving_text = False
         while True:
-            opcode, payload = self._recv_frame()
+            final, opcode, payload = self._recv_frame()
             if opcode == 0x8:
                 raise CdpError("WebSocket closed")
             if opcode == 0x9:
                 self._send_pong(payload)
                 continue
-            if opcode in {0x1, 0x0}:
+            if opcode == 0x1:
+                fragments = [payload]
+                receiving_text = True
+                if final:
+                    return b"".join(fragments).decode("utf-8")
+                continue
+            if opcode == 0x0 and receiving_text:
                 fragments.append(payload)
-                if opcode == 0x1:
+                if final:
                     return b"".join(fragments).decode("utf-8")
 
     def _send_pong(self, payload: bytes) -> None:
@@ -146,9 +179,10 @@ class _WebSocket:
         masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
         self.socket.sendall(bytes(header) + mask + masked)
 
-    def _recv_frame(self) -> tuple[int, bytes]:
+    def _recv_frame(self) -> tuple[bool, int, bytes]:
         first_two = self._recv_exact(2)
         first, second = first_two
+        final = bool(first & 0x80)
         opcode = first & 0x0F
         masked = bool(second & 0x80)
         length = second & 0x7F
@@ -161,7 +195,7 @@ class _WebSocket:
         payload = self._recv_exact(length) if length else b""
         if masked:
             payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
-        return opcode, payload
+        return final, opcode, payload
 
     def _recv_exact(self, size: int) -> bytes:
         data = bytearray()

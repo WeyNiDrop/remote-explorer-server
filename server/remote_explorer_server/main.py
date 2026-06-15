@@ -215,6 +215,9 @@ def main(argv: list[str] | None = None) -> int:
     if web_client is not None:
         web_client.client_changed.connect(window.server_control_panel.update_client)
         app.aboutToQuit.connect(web_client.stop)
+    shutdown_browser = getattr(window, "shutdown", None)
+    if callable(shutdown_browser):
+        app.aboutToQuit.connect(shutdown_browser)
     window.show()
 
     if not chrome_executable:

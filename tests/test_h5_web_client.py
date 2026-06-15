@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from remote_explorer_server.config import ServerConfig, config_with_local_domain, load_server_settings, save_server_local_domain
 from remote_explorer_server.local_domain import MdnsHostResponder, local_domain_for_machine, normalize_local_domain, sanitize_domain_label
 from remote_explorer_server.qr import make_qr_matrix, make_qr_png
 from remote_explorer_server.security import SESSION_TTL_SECONDS, WEB_SESSION_TTL_SECONDS, AuthError, AuthManager
-from remote_explorer_server.web_client import INDEX_HTML, local_client_urls
+from remote_explorer_server.web_client import INDEX_HTML, WebClientService, _SnapshotRequest, local_client_urls
 
 
 class H5WebClientTests(unittest.TestCase):
@@ -38,6 +42,41 @@ class H5WebClientTests(unittest.TestCase):
         self.assertIn("invalid_session", INDEX_HTML)
         self.assertIn("handleSessionExpired", INDEX_HTML)
         self.assertIn("sessionExpired", INDEX_HTML)
+
+    def test_h5_client_pauses_snapshot_polling_while_hidden(self) -> None:
+        self.assertIn('document.addEventListener("visibilitychange"', INDEX_HTML)
+        self.assertIn("new AbortController()", INDEX_HTML)
+        self.assertIn("if (!state.streamEnabled || !state.sessionId || document.hidden) return;", INDEX_HTML)
+
+    def test_chromium_snapshot_capture_runs_off_the_request_dispatch_thread(self) -> None:
+        release_capture = threading.Event()
+
+        class Browser:
+            def capture_jpeg(self, quality: int) -> bytes:
+                del quality
+                release_capture.wait(1.0)
+                return b"jpeg"
+
+        service = WebClientService.__new__(WebClientService)
+        service.auth_manager = SimpleNamespace(touch_session=lambda _session_id: True)
+        service.browser_window = SimpleNamespace(browser=Browser())
+        service._stopping = False
+        service._snapshot_executor = ThreadPoolExecutor(max_workers=1)
+        service._snapshot_future = None
+        request = _SnapshotRequest("session", 960, 55, threading.Event())
+        try:
+            started = time.monotonic()
+            WebClientService._process_snapshot_request(service, request)
+            self.assertLess(time.monotonic() - started, 0.2)
+            self.assertFalse(request.event.is_set())
+
+            release_capture.set()
+            self.assertTrue(request.event.wait(1.0))
+            self.assertEqual(request.result, b"jpeg")
+            self.assertIsNone(request.error)
+        finally:
+            release_capture.set()
+            service._snapshot_executor.shutdown(wait=True, cancel_futures=True)
 
     def test_auth_manager_can_touch_existing_web_snapshot_session(self) -> None:
         auth = AuthManager(None)

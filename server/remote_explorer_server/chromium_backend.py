@@ -4,6 +4,8 @@ import base64
 import json
 import logging
 import math
+import os
+import signal
 import shutil
 import socket
 import struct
@@ -46,6 +48,8 @@ from .streaming_protocol import (
 LOGGER = logging.getLogger("remote_explorer.chromium")
 IDLE_CAPTURE_INTERVAL_MS = 1000
 STREAM_CLIENT_ACTIVITY_TIMEOUT_SECONDS = 25.0
+STREAM_CAPTURE_SUSPEND_TIMEOUT_SECONDS = 5 * 60.0
+PROFILE_LOCK_NAMES = ("SingletonCookie", "SingletonLock", "SingletonSocket")
 
 
 class ChromiumUnavailable(RuntimeError):
@@ -62,6 +66,7 @@ class ChromiumBrowserWindow(QMainWindow):
         self.browser = ChromiumBrowserService(config)
         self.stream_service = ChromiumStreamService(self.browser, self)
         self.controller = ChromiumBrowserController(self.browser, self.stream_service, config.allow_evaluate_js)
+        self._shutdown_started = False
 
         self.address_bar = QLineEdit(self)
         self.address_bar.setText(normalize_url(config.start_url))
@@ -93,8 +98,15 @@ class ChromiumBrowserWindow(QMainWindow):
         self.browser.navigate(url)
         self.address_bar.setText(url)
 
-    def closeEvent(self, event: Any) -> None:
+    def shutdown(self) -> None:
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+        self.stream_service.close()
         self.browser.close()
+
+    def closeEvent(self, event: Any) -> None:
+        self.shutdown()
         super().closeEvent(event)
 
 
@@ -107,16 +119,27 @@ class ChromiumBrowserService:
                 "Could not find Chrome, Edge, or Chromium. Pass --browser-executable PATH."
             )
 
-        self.port = _free_port()
         self.profile_dir = config.data_dir / "chromium-profile"
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        remaining_profile_processes = _cleanup_stale_chromium_profile(self.profile_dir)
+        if remaining_profile_processes:
+            raise ChromiumUnavailable(
+                "Could not stop the previous Chromium process using the Remote Explorer profile: "
+                + ", ".join(str(pid) for pid in remaining_profile_processes)
+            )
+        self.port = _free_port()
         self.browser_log_file = None
         self.viewport_width = 1280
         self.viewport_height = 720
         self._stream_viewport: tuple[int, int] | None = None
         self._fullscreen_topmost = False
+        self._closed = False
+        self._reconnect_lock = threading.Lock()
+        self.process_group_id: int | None = None
         try:
             self.process = self._launch_browser(config.start_url)
+            if sys.platform != "win32":
+                self.process_group_id = self.process.pid
             self.connection = self._connect()
             self._configure_page()
             self.navigate(normalize_url(config.start_url))
@@ -134,22 +157,20 @@ class ChromiumBrowserService:
             raise ChromiumUnavailable(f"Chromium startup failed: {exc}") from exc
 
     def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         self._set_fullscreen_topmost(False)
         connection = getattr(self, "connection", None)
-        if connection is not None and self.process.poll() is None:
+        process = getattr(self, "process", None)
+        if connection is not None and process is not None and process.poll() is None:
             try:
                 connection.call("Browser.close", timeout=2.0)
             except Exception as exc:
                 LOGGER.debug("Could not close Chromium through CDP: %s", exc)
-                try:
-                    self.process.wait(timeout=2.0)
-                    return
-                except subprocess.TimeoutExpired:
-                    pass
             else:
                 try:
-                    self.process.wait(timeout=4.0)
-                    return
+                    process.wait(timeout=4.0)
                 except subprocess.TimeoutExpired:
                     LOGGER.debug("Chromium did not exit after CDP close; terminating")
         if connection is not None:
@@ -157,13 +178,13 @@ class ChromiumBrowserService:
                 connection.close()
             except Exception:
                 pass
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=3.0)
-            except subprocess.TimeoutExpired:
-                LOGGER.debug("Chromium did not exit after terminate; killing")
-                self.process.kill()
+        if process is not None:
+            _terminate_owned_process(process, getattr(self, "process_group_id", None))
+        profile_dir = getattr(self, "profile_dir", None)
+        if isinstance(profile_dir, Path):
+            remaining = _cleanup_stale_chromium_profile(profile_dir)
+            if remaining:
+                LOGGER.warning("Chromium processes still use the Remote Explorer profile after shutdown: %s", remaining)
         if self.browser_log_file is not None:
             try:
                 self.browser_log_file.close()
@@ -277,13 +298,18 @@ class ChromiumBrowserService:
         self.viewport_height = max(1, int(height))
 
     def capture_jpeg(self, quality: int) -> bytes:
+        connection = self.connection
         try:
             result = self._capture_jpeg_result(quality)
         except CdpError as exc:
-            if "Not attached to an active page" not in str(exc):
+            if getattr(self, "_closed", False) or not _is_recoverable_capture_error(exc):
                 raise
-            LOGGER.info("Chromium page target detached during capture; reconnecting CDP page")
-            self._reconnect_page()
+            LOGGER.warning("Chromium capture connection failed; reconnecting CDP page: %s", exc)
+            with self._reconnect_lock:
+                if getattr(self, "_closed", False):
+                    raise
+                if self.connection is connection:
+                    self._reconnect_page()
             result = self._capture_jpeg_result(quality)
         encoded = result.get("data")
         if not isinstance(encoded, str) or not encoded:
@@ -312,6 +338,8 @@ class ChromiumBrowserService:
         )
 
     def _reconnect_page(self) -> None:
+        if getattr(self, "_closed", False):
+            raise CdpError("Chromium browser is closing")
         stream_viewport = self._stream_viewport
         try:
             self.connection.close()
@@ -614,6 +642,7 @@ class ChromiumBrowserService:
             stdin=subprocess.DEVNULL,
             stdout=self.browser_log_file,
             stderr=subprocess.STDOUT,
+            start_new_session=sys.platform != "win32",
         )
 
     def _connect(self) -> CdpConnection:
@@ -715,8 +744,12 @@ class ChromiumStreamService(QObject):
         self.last_stats_at = time.monotonic()
         self.last_client_activity_at = 0.0
         self.using_idle_capture_interval = False
+        self.capture_suspended = False
+        self._closed = False
 
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if getattr(self, "_closed", False):
+            raise RuntimeError("Chromium stream service is closed")
         host = clean_host(str(payload.get("_source_host") or payload.get("host") or ""))
         port = int(payload.get("port") or payload.get("stream_port") or 0)
         if not host:
@@ -759,8 +792,26 @@ class ChromiumStreamService(QObject):
         self.target_address = None
         self.last_client_activity_at = 0.0
         self.using_idle_capture_interval = False
+        self.capture_suspended = False
         self.browser.clear_stream_viewport()
         return self.status()
+
+    def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        self.timer.stop()
+        self.config = None
+        self.target_host = None
+        self.target_address = None
+        self.last_client_activity_at = 0.0
+        self.using_idle_capture_interval = False
+        self.capture_suspended = False
+        try:
+            self.socket.close()
+        except OSError:
+            pass
+        self.encoder.shutdown(wait=False, cancel_futures=True)
 
     def configure(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.config:
@@ -811,12 +862,17 @@ class ChromiumStreamService(QObject):
         }
 
     def mark_client_activity(self) -> None:
+        if getattr(self, "_closed", False):
+            return
         self.last_client_activity_at = time.monotonic()
         if not self.config:
             return
 
         self.timer.setInterval(self._configured_capture_interval_ms())
         self.using_idle_capture_interval = False
+        if getattr(self, "capture_suspended", False) or not self.timer.isActive():
+            self.timer.start()
+        self.capture_suspended = False
 
     def _send_frame(self) -> None:
         self._apply_idle_capture_interval_if_needed()
@@ -834,20 +890,29 @@ class ChromiumStreamService(QObject):
         self.pending_frame = self.encoder.submit(self._capture_and_send, self.config, self.target_address, self.frame_id)
 
     def _apply_idle_capture_interval_if_needed(self) -> None:
-        if not self.config or self.using_idle_capture_interval:
+        if not self.config or getattr(self, "capture_suspended", False):
             return
 
         idle_for = time.monotonic() - self.last_client_activity_at
+        if idle_for >= STREAM_CAPTURE_SUSPEND_TIMEOUT_SECONDS:
+            self.timer.stop()
+            self.capture_suspended = True
+            LOGGER.info(
+                "Chromium UDP stream suspended: no client activity for %.1fs",
+                idle_for,
+            )
+            return
         if idle_for < STREAM_CLIENT_ACTIVITY_TIMEOUT_SECONDS:
             return
 
-        self.timer.setInterval(IDLE_CAPTURE_INTERVAL_MS)
-        self.using_idle_capture_interval = True
-        LOGGER.info(
-            "Chromium UDP stream idle: no client activity for %.1fs; capture interval=%sms",
-            idle_for,
-            IDLE_CAPTURE_INTERVAL_MS,
-        )
+        if not self.using_idle_capture_interval:
+            self.timer.setInterval(IDLE_CAPTURE_INTERVAL_MS)
+            self.using_idle_capture_interval = True
+            LOGGER.info(
+                "Chromium UDP stream idle: no client activity for %.1fs; capture interval=%sms",
+                idle_for,
+                IDLE_CAPTURE_INTERVAL_MS,
+            )
 
     def _configured_capture_interval_ms(self) -> int:
         fps = self.config.fps if self.config else DEFAULT_STREAM_FPS
@@ -1188,6 +1253,165 @@ return remoteExplorerRunMediaAction(media, action, amount);
             respond(_error("forbidden", "evaluate_js is disabled"))
             return
         respond(_ok(_normalize_js_result(self.browser.evaluate(str(payload.get("script") or "")))))
+
+
+def _is_recoverable_capture_error(exc: CdpError) -> bool:
+    message = str(exc).lower()
+    if "timed out waiting for the cdp connection" in message:
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "not attached to an active page",
+            "captureScreenshot timed out".lower(),
+            "connection failed",
+            "websocket closed",
+            "connection is closed",
+        )
+    )
+
+
+def _cleanup_stale_chromium_profile(profile_dir: Path) -> list[int]:
+    if sys.platform not in {"darwin", "linux"}:
+        return []
+
+    profile_path = str(profile_dir.resolve())
+    scan_succeeded, stale = _scan_profile_processes(profile_path)
+    if not scan_succeeded:
+        LOGGER.warning("Could not inspect existing Chromium processes for profile %s", profile_path)
+        return []
+    if stale:
+        LOGGER.warning(
+            "Stopping stale Chromium processes for Remote Explorer profile %s: %s",
+            profile_path,
+            ", ".join(str(pid) for pid in stale),
+        )
+        for pid in stale:
+            _signal_process(pid, signal.SIGTERM)
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            scan_succeeded, remaining = _scan_profile_processes(profile_path)
+            if not scan_succeeded:
+                return stale
+            if not remaining:
+                break
+            time.sleep(0.1)
+
+        scan_succeeded, remaining = _scan_profile_processes(profile_path)
+        if not scan_succeeded:
+            return stale
+        if remaining:
+            for pid in remaining:
+                _signal_process(pid, signal.SIGKILL)
+
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                scan_succeeded, remaining = _scan_profile_processes(profile_path)
+                if not scan_succeeded:
+                    return stale
+                if not remaining:
+                    break
+                time.sleep(0.1)
+    else:
+        remaining = []
+
+    if not remaining:
+        for name in PROFILE_LOCK_NAMES:
+            try:
+                (profile_dir / name).unlink(missing_ok=True)
+            except OSError as exc:
+                LOGGER.debug("Could not remove stale Chromium profile lock %s: %s", name, exc)
+    return remaining
+
+
+def _find_profile_processes(profile_path: str) -> list[int]:
+    return _scan_profile_processes(profile_path)[1]
+
+
+def _scan_profile_processes(profile_path: str) -> tuple[bool, list[int]]:
+    try:
+        result = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, []
+    if result.returncode != 0:
+        return False, []
+
+    marker = f"--user-data-dir={profile_path}"
+    process_ids: list[int] = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or marker not in parts[1]:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid != os.getpid():
+            process_ids.append(pid)
+    return True, process_ids
+
+
+def _signal_process(pid: int, signal_number: int) -> None:
+    try:
+        os.kill(pid, signal_number)
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _terminate_owned_process(process: subprocess.Popen[Any], process_group_id: int | None) -> None:
+    if sys.platform != "win32" and process_group_id:
+        try:
+            os.killpg(process_group_id, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and _process_group_exists(process_group_id):
+            try:
+                process.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
+        if _process_group_exists(process_group_id):
+            LOGGER.debug("Chromium process group did not exit after terminate; killing")
+            try:
+                os.killpg(process_group_id, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+        return
+
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=3.0)
+    except subprocess.TimeoutExpired:
+        LOGGER.debug("Chromium did not exit after terminate; killing")
+        process.kill()
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def find_chromium_executable(explicit: str | None = None) -> str | None:

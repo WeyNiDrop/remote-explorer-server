@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -116,6 +117,39 @@ class ChromiumBrowserServiceTests(unittest.TestCase):
 
         self.assertTrue(process.terminated)
         self.assertTrue(log_file.closed)
+
+    def test_profile_process_scan_only_matches_remote_explorer_profile(self) -> None:
+        profile = "/Users/test/.remote-explorer/chromium-profile"
+        ps_result = subprocess.CompletedProcess(
+            args=["ps"],
+            returncode=0,
+            stdout=(
+                f"  111 /Applications/Google Chrome --user-data-dir={profile} about:blank\n"
+                "  222 /Applications/Google Chrome --user-data-dir=/Users/test/Library/Chrome\n"
+                "  333 remote-explorer-server\n"
+            ),
+            stderr="",
+        )
+        with patch.object(chromium_backend.subprocess, "run", return_value=ps_result):
+            self.assertEqual(chromium_backend._find_profile_processes(profile), [111])
+
+    def test_profile_cleanup_stops_matching_process_and_removes_stale_locks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = Path(temp_dir)
+            lock = profile / "SingletonLock"
+            lock.write_text("stale", encoding="utf-8")
+            scans = iter([(True, [111]), (True, []), (True, [])])
+            signals = []
+            with (
+                patch.object(chromium_backend.sys, "platform", "darwin"),
+                patch.object(chromium_backend, "_scan_profile_processes", side_effect=lambda _path: next(scans)),
+                patch.object(chromium_backend, "_signal_process", side_effect=lambda pid, sig: signals.append((pid, sig))),
+            ):
+                remaining = chromium_backend._cleanup_stale_chromium_profile(profile)
+            self.assertFalse(lock.exists())
+
+        self.assertEqual(remaining, [])
+        self.assertEqual(signals, [(111, chromium_backend.signal.SIGTERM)])
 
     def test_macos_escape_shortcut_does_not_send_text_parameter(self) -> None:
         service = ChromiumBrowserService.__new__(ChromiumBrowserService)
